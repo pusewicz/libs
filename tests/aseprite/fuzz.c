@@ -10,7 +10,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
 
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   aseprite_sprite sprite;
-  if (aseprite_load_memory(data, size, &sprite) == ASEPRITE_OK) {
+  if (aseprite_load_memory(data, size, nullptr, &sprite) == ASEPRITE_OK) {
     volatile uint64_t sum = walk_sprite(&sprite);
     (void)sum;
     aseprite_free(&sprite);

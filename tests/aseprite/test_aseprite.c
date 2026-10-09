@@ -31,7 +31,7 @@ static void fixture_path(char* path, size_t size, const char* name,
 static aseprite_result load(const char* name, aseprite_sprite* sprite) {
   char path[1024];
   fixture_path(path, sizeof path, name, ".aseprite");
-  return aseprite_load_file(path, sprite);
+  return aseprite_load_file(path, nullptr, sprite);
 }
 
 // Reads a whole file. The caller frees the data.
@@ -656,8 +656,9 @@ static bool check_prefixes(const char* name) {
   bool ok = true;
   for (size_t length = 0; ok && length <= size; length++) {
     aseprite_sprite sprite;
-    aseprite_result result = aseprite_load_memory(data, length, &sprite);
-    ok                     = (result == ASEPRITE_OK) == (length == size);
+    aseprite_result result =
+        aseprite_load_memory(data, length, nullptr, &sprite);
+    ok = (result == ASEPRITE_OK) == (length == size);
     aseprite_free(&sprite);
   }
   free(data);

@@ -75,7 +75,7 @@ static bool check_allocation_failures(const char* name) {
   releases           = 0;
   failing_allocation = 0;
   aseprite_sprite sprite;
-  bool ok       = aseprite_load_memory(data, size, &sprite) == ASEPRITE_OK;
+  bool ok = aseprite_load_memory(data, size, nullptr, &sprite) == ASEPRITE_OK;
   size_t needed = allocations;
   aseprite_free(&sprite);
   ok = ok && needed > 0 && releases == allocations;
@@ -84,9 +84,9 @@ static bool check_allocation_failures(const char* name) {
     allocations        = 0;
     releases           = 0;
     failing_allocation = i;
-    ok =
-        aseprite_load_memory(data, size, &sprite) == ASEPRITE_ERROR_NO_MEMORY &&
-        sprite.memory == nullptr && releases == allocations - 1;
+    ok = aseprite_load_memory(data, size, nullptr, &sprite) ==
+             ASEPRITE_ERROR_NO_MEMORY &&
+         sprite.memory == nullptr && releases == allocations - 1;
   }
   failing_allocation = 0;
   free(data);

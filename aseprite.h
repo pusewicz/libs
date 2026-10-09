@@ -1,7 +1,7 @@
 /*
  * aseprite.h - read Aseprite files (.ase, .aseprite).
  *
- * Version: 0.1.0
+ * Version: 0.2.0
  * SPDX-License-Identifier: Zlib
  * Copyright (c) 2026 Piotr Usewicz
  *
@@ -15,17 +15,23 @@
  *   #include "aseprite.h"
  *
  *   aseprite_sprite sprite;
- *   aseprite_result result = aseprite_load_file("hero.aseprite", &sprite);
+ *   aseprite_result result =
+ *       aseprite_load_file("hero.aseprite", nullptr, &sprite);
  *   if (result != ASEPRITE_OK) {
  *     fprintf(stderr, "%s\n", aseprite_result_string(result));
  *   }
  *   ...
  *   aseprite_free(&sprite);
  *
+ * Memory. A load uses malloc and free. To use your own memory, give an
+ * aseprite_allocator in the aseprite_options of the load.
+ *
  * Options. Define them before you include this file:
  *
- *   ASEPRITE_MALLOC(size)  Replace malloc. Define ASEPRITE_FREE also.
- *   ASEPRITE_FREE(pointer) Replace free. Define ASEPRITE_MALLOC also.
+ *   ASEPRITE_MALLOC(size)  Replace malloc in the default allocator. Define
+ *                          ASEPRITE_FREE also.
+ *   ASEPRITE_FREE(pointer) Replace free in the default allocator. Define
+ *                          ASEPRITE_MALLOC also.
  *   ASEPRITE_ASSERT(expr)  Replace assert.
  *   ASEPRITE_NO_STDIO      Remove aseprite_load_file. Define it for all files.
  *
@@ -413,6 +419,30 @@ typedef struct aseprite_color_profile {
 } aseprite_color_profile;
 
 /**
+ * Gives the library its memory. All the functions are required, or none:
+ * a zeroed allocator uses malloc and free.
+ */
+typedef struct aseprite_allocator {
+  /**
+   * Gets size bytes, aligned to alignment. alignment is a power of two, at
+   * most alignof(max_align_t).
+   *
+   * @return The memory, or nullptr.
+   */
+  void* (*alloc)(void* user, size_t size, size_t alignment);
+  /** Releases memory from alloc(). size is the size given to alloc(). */
+  void (*release)(void* user, void* pointer, size_t size);
+  /** Passed to both functions. */
+  void* user;
+} aseprite_allocator;
+
+/** The settings of a load. A zeroed struct, or nullptr, gives the defaults. */
+typedef struct aseprite_options {
+  /** The memory of the sprite. Release it with aseprite_free(). */
+  aseprite_allocator allocator;
+} aseprite_options;
+
+/**
  * A loaded Aseprite file. The library owns all the memory. Release it with
  * aseprite_free().
  */
@@ -447,30 +477,38 @@ typedef struct aseprite_sprite {
   aseprite_external_file* external_files;
   aseprite_color_profile color_profile;
   aseprite_user_data user_data;
-  void* memory; /**< Internal. Do not change. */
+  void* memory;                 /**< Internal. Do not change. */
+  aseprite_allocator allocator; /**< Internal. Do not change. */
 } aseprite_sprite;
 
 /**
  * Loads an Aseprite file from memory.
  *
- * @param data   The file data. The sprite does not use it after the load.
- * @param size   The size of the data in bytes.
- * @param sprite Receives the sprite. On error it is empty.
+ * @param data    The file data. The sprite does not use it after the load.
+ * @param size    The size of the data in bytes.
+ * @param options The settings, or nullptr for the defaults. The sprite keeps
+ *                the allocator, which must stay valid until aseprite_free().
+ * @param sprite  Receives the sprite. On error it is empty.
  * @return ASEPRITE_OK, or the error.
  */
 [[__nodiscard__]] aseprite_result
-aseprite_load_memory(const void* data, size_t size, aseprite_sprite* sprite);
+aseprite_load_memory(const void* data, size_t size,
+                     const aseprite_options* options, aseprite_sprite* sprite);
 
 #ifndef ASEPRITE_NO_STDIO
 /**
- * Loads an Aseprite file from the disk.
+ * Loads an Aseprite file from the disk. The file data uses the allocator of
+ * the options for the time of the load.
  *
- * @param path   The path of the file.
- * @param sprite Receives the sprite. On error it is empty.
+ * @param path    The path of the file.
+ * @param options The settings, or nullptr for the defaults. The sprite keeps
+ *                the allocator, which must stay valid until aseprite_free().
+ * @param sprite  Receives the sprite. On error it is empty.
  * @return ASEPRITE_OK, or the error.
  */
-[[__nodiscard__]] aseprite_result aseprite_load_file(const char* path,
-                                                     aseprite_sprite* sprite);
+[[__nodiscard__]] aseprite_result
+aseprite_load_file(const char* path, const aseprite_options* options,
+                   aseprite_sprite* sprite);
 #endif
 
 /**
@@ -631,24 +669,56 @@ struct aseprite_block {
 
 typedef struct aseprite_arena {
   aseprite_block* head;
+  aseprite_allocator allocator;
 } aseprite_arena;
 
+static void* aseprite_default_alloc([[maybe_unused]] void* user, size_t size,
+                                    [[maybe_unused]] size_t alignment) {
+  return ASEPRITE_MALLOC(size);
+}
+
+static void aseprite_default_release([[maybe_unused]] void* user, void* pointer,
+                                     [[maybe_unused]] size_t size) {
+  ASEPRITE_FREE(pointer);
+}
+
+// Returns the allocator of the options, with the defaults for a zeroed one.
+static aseprite_allocator
+aseprite_resolve_allocator(const aseprite_options* options) {
+  aseprite_allocator allocator =
+      options ? options->allocator : (aseprite_allocator){};
+  ASEPRITE_ASSERT((allocator.alloc != nullptr) ==
+                  (allocator.release != nullptr));
+  if (!allocator.alloc) {
+    allocator = (aseprite_allocator){
+        .alloc   = aseprite_default_alloc,
+        .release = aseprite_default_release,
+        .user    = allocator.user,
+    };
+  }
+  return allocator;
+}
+
 // Releases a list of blocks.
-static void aseprite_arena_free(aseprite_block* block) {
+static void aseprite_arena_free(aseprite_block* block,
+                                const aseprite_allocator* allocator) {
   while (block) {
     aseprite_block* next = block->next;
-    ASEPRITE_FREE(block);
+    allocator->release(allocator->user, block,
+                       sizeof(aseprite_block) + block->size);
     block = next;
   }
 }
 
 // Allocates a block with room for size bytes.
-static aseprite_block* aseprite_new_block(size_t size) {
+static aseprite_block* aseprite_new_block(const aseprite_allocator* allocator,
+                                          size_t size) {
   size_t total = 0;
   if (ckd_add(&total, sizeof(aseprite_block), size)) {
     return nullptr;
   }
-  aseprite_block* block = ASEPRITE_MALLOC(total);
+  aseprite_block* block =
+      allocator->alloc(allocator->user, total, aseprite_alignment);
   if (block) {
     block->next = nullptr;
     block->used = 0;
@@ -673,7 +743,7 @@ static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
   }
 
   if (head && rounded > aseprite_block_size / 4) {
-    aseprite_block* block = aseprite_new_block(rounded);
+    aseprite_block* block = aseprite_new_block(&arena->allocator, rounded);
     if (!block) {
       return nullptr;
     }
@@ -685,7 +755,7 @@ static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
 
   size_t size_of_block =
       rounded > aseprite_block_size ? rounded : aseprite_block_size;
-  aseprite_block* block = aseprite_new_block(size_of_block);
+  aseprite_block* block = aseprite_new_block(&arena->allocator, size_of_block);
   if (!block) {
     return nullptr;
   }
@@ -2613,6 +2683,7 @@ static aseprite_result aseprite_read_frames(aseprite_parser* parser,
 /* ---- Public functions -------------------------------------------------- */
 
 aseprite_result aseprite_load_memory(const void* data, size_t size,
+                                     const aseprite_options* options,
                                      aseprite_sprite* sprite) {
   ASEPRITE_ASSERT(sprite);
   ASEPRITE_ASSERT(data || size == 0);
@@ -2625,8 +2696,10 @@ aseprite_result aseprite_load_memory(const void* data, size_t size,
     size = UINT32_MAX;
   }
 
-  aseprite_parser parser = {
+  aseprite_allocator allocator = aseprite_resolve_allocator(options);
+  aseprite_parser parser       = {
       .sprite           = sprite,
+      .arena            = {.allocator = allocator},
       .target           = ASEPRITE_TARGET_OBJECT,
       .target_user_data = &sprite->user_data,
   };
@@ -2651,16 +2724,19 @@ aseprite_result aseprite_load_memory(const void* data, size_t size,
     result = aseprite_read_frames(&parser, file);
   }
   if (result != ASEPRITE_OK) {
-    aseprite_arena_free(parser.arena.head);
+    aseprite_arena_free(parser.arena.head, &allocator);
     *sprite = (aseprite_sprite){};
     return result;
   }
-  sprite->memory = parser.arena.head;
+  sprite->memory    = parser.arena.head;
+  sprite->allocator = allocator;
   return ASEPRITE_OK;
 }
 
 #ifndef ASEPRITE_NO_STDIO
-aseprite_result aseprite_load_file(const char* path, aseprite_sprite* sprite) {
+aseprite_result aseprite_load_file(const char* path,
+                                   const aseprite_options* options,
+                                   aseprite_sprite* sprite) {
   ASEPRITE_ASSERT(path);
   ASEPRITE_ASSERT(sprite);
   *sprite    = (aseprite_sprite){};
@@ -2675,14 +2751,16 @@ aseprite_result aseprite_load_file(const char* path, aseprite_sprite* sprite) {
     size = ftell(file);
   }
   if (size >= 0 && fseek(file, 0, SEEK_SET) == 0) {
-    uint8_t* data = ASEPRITE_MALLOC(size > 0 ? (size_t)size : 1);
+    aseprite_allocator allocator = aseprite_resolve_allocator(options);
+    size_t capacity              = size > 0 ? (size_t)size : 1;
+    uint8_t* data = allocator.alloc(allocator.user, capacity, alignof(uint8_t));
     if (!data) {
       result = ASEPRITE_ERROR_NO_MEMORY;
     } else {
       if (fread(data, 1, (size_t)size, file) == (size_t)size) {
-        result = aseprite_load_memory(data, (size_t)size, sprite);
+        result = aseprite_load_memory(data, (size_t)size, options, sprite);
       }
-      ASEPRITE_FREE(data);
+      allocator.release(allocator.user, data, capacity);
     }
   }
   (void)fclose(file);
@@ -2692,7 +2770,7 @@ aseprite_result aseprite_load_file(const char* path, aseprite_sprite* sprite) {
 
 void aseprite_free(aseprite_sprite* sprite) {
   ASEPRITE_ASSERT(sprite);
-  aseprite_arena_free(sprite->memory);
+  aseprite_arena_free(sprite->memory, &sprite->allocator);
   *sprite = (aseprite_sprite){};
 }
 
