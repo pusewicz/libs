@@ -22,6 +22,7 @@ require "shellwords"
 
 BUILD = "build"
 FIXTURES = "#{BUILD}/fixtures/aseprite"
+ANIM_FIXTURES = "#{BUILD}/fixtures/pxl_anim"
 SANITIZE = %w[-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all].freeze
 SOURCES = FileList["*.h", "tests/**/*.{c,h}", "examples/**/*.{c,h}"]
 TIDY_SOURCES = FileList["tests/**/*.c", "examples/**/*.c"]
@@ -29,7 +30,7 @@ LLVM = "/opt/homebrew/opt/llvm/bin"
 EXE = RbConfig::CONFIG["EXEEXT"]
 
 # The pkg-config packages of each library.
-PACKAGES = { "pxl" => %w[sdl3] }.freeze
+PACKAGES = { "pxl" => %w[sdl3], "pxl_anim" => %w[sdl3] }.freeze
 
 # The test programs of each library: program => the C files in tests/<name>/.
 TESTS = {
@@ -37,10 +38,13 @@ TESTS = {
     "test_aseprite" => %w[test_aseprite consumer], "test_render" => %w[test_render], "test_options" => %w[test_options]
   },
   "pxl" => { "test_pxl" => %w[test_pxl], "test_options" => %w[test_options] },
+  "pxl_anim" => {
+    "test_pxl_anim" => %w[test_pxl_anim], "test_draw" => %w[test_draw], "test_options" => %w[test_options]
+  },
 }.freeze
 
 # The arguments of the test programs of each library.
-TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
+TEST_ARGUMENTS = { "aseprite" => [FIXTURES], "pxl_anim" => [ANIM_FIXTURES] }.freeze
 
 # The environment of the test programs. The Vulkan loader keeps the drivers
 # loaded until exit. Else LeakSanitizer reports their memory as leaks, with no
@@ -187,8 +191,12 @@ file "#{FIXTURES}/rgba.aseprite" => "tests/aseprite/fixtures.rb" do
   ruby "tests/aseprite/fixtures.rb", FIXTURES
 end
 
+file "#{ANIM_FIXTURES}/character.aseprite" => %w[tests/pxl_anim/fixtures.rb tests/aseprite/fixtures.rb] do
+  ruby "tests/pxl_anim/fixtures.rb", ANIM_FIXTURES
+end
+
 desc "Write the test fixtures"
-task fixtures: "#{FIXTURES}/rgba.aseprite"
+task fixtures: ["#{FIXTURES}/rgba.aseprite", "#{ANIM_FIXTURES}/character.aseprite"]
 
 test_builds = []
 test_runs = []
