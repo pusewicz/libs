@@ -1000,6 +1000,58 @@ TEST_CASE(test_present_with_full_geometry) {
   return true;
 }
 
+TEST_CASE(test_pools) {
+  pxl_desc desc     = limited_desc();
+  desc.max_textures = 2;
+  desc.max_shaders  = 1;
+  desc.max_fonts    = 1;
+  pxl_context* pxl  = pxl_create_in(&desc, block, pxl_memory_size(&desc));
+  REQUIRE(pxl != nullptr);
+
+  const pxl_color pixels[]       = {red, red, red, red, red, red, red, red};
+  const pxl_texture_desc texture = {.width = 4, .height = 2, .pixels = pixels};
+  pxl_texture* a                 = pxl_create_texture(pxl, &texture);
+  pxl_texture* b                 = pxl_create_texture(pxl, &texture);
+  bool ok                        = a && b && !pxl_create_texture(pxl, &texture);
+
+  // A slot is free again after pxl_destroy_texture(). In a frame, the slot
+  // is free after the frame.
+  pxl_destroy_texture(pxl, a);
+  a  = pxl_create_texture(pxl, &texture);
+  ok = ok && a;
+  pxl_begin_frame(pxl);
+  pxl_destroy_texture(pxl, a);
+  ok = ok && !pxl_create_texture(pxl, &texture);
+  ok = pxl_end_frame(pxl) && ok;
+  a  = pxl_create_texture(pxl, &texture);
+  ok = ok && a;
+
+  pxl_shader* shader = pxl_create_shader(pxl, &slots_frag);
+  ok                 = ok && shader && !pxl_create_shader(pxl, &slots_frag);
+  pxl_destroy_shader(pxl, shader);
+  shader = pxl_create_shader(pxl, &slots_frag);
+  ok     = ok && shader;
+
+  const pxl_font_desc font_desc = {
+      .texture      = b,
+      .glyph_width  = 2,
+      .glyph_height = 2,
+  };
+  pxl_font* font = pxl_create_font(pxl, &font_desc);
+  ok             = ok && font && !pxl_create_font(pxl, &font_desc);
+  pxl_destroy_font(pxl, font);
+  font = pxl_create_font(pxl, &font_desc);
+  ok   = ok && font;
+
+  pxl_destroy_font(pxl, font);
+  pxl_destroy_shader(pxl, shader);
+  pxl_destroy_texture(pxl, a);
+  pxl_destroy_texture(pxl, b);
+  pxl_destroy(pxl);
+  REQUIRE(ok);
+  return true;
+}
+
 TEST_CASE(test_memory_size) {
   pxl_desc desc = {};
   size_t normal = pxl_memory_size(&desc);
@@ -1055,6 +1107,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_create_in);
   RUN_TEST_CASE(test_limits);
   RUN_TEST_CASE(test_present_with_full_geometry);
+  RUN_TEST_CASE(test_pools);
 }
 
 /**

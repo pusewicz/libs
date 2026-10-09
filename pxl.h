@@ -220,6 +220,13 @@ typedef struct pxl_desc {
    * more fails.
    */
   size_t max_pipelines;
+  /**
+   * The most textures, shaders and fonts that you can have at the same time.
+   * 0 uses the default. A texture or shader that you destroy during a frame
+   * is free again after the frame. The textures, shader and font of pxl
+   * itself do not count. A create function over the limit returns nullptr.
+   */
+  size_t max_textures, max_shaders, max_fonts;
 } pxl_desc;
 
 /** The work of the last frame. */
@@ -242,9 +249,10 @@ typedef struct pxl_stats {
 [[__nodiscard__]] size_t pxl_memory_size(const pxl_desc* desc);
 
 /**
- * Creates a context in memory that you give. pxl does not allocate memory for
- * the context. It still creates textures, shaders and fonts with the
- * allocator of the build, and SDL allocates the GPU objects.
+ * Creates a context in memory that you give. The context, its frame arrays
+ * and its pools of textures, shaders and fonts are in the memory. A copy of
+ * the advances of a font and long text still use PXL_MALLOC, and SDL
+ * allocates the GPU objects.
  *
  * @param desc   The settings.
  * @param memory The memory, aligned to alignof(max_align_t). You own it.
@@ -2106,6 +2114,15 @@ constexpr size_t pxl__default_indices       = 98304;
 constexpr size_t pxl__default_commands      = 1024;
 constexpr size_t pxl__default_uniform_bytes = 65536;
 constexpr size_t pxl__default_pipelines     = 64;
+constexpr size_t pxl__default_textures      = 256;
+constexpr size_t pxl__default_shaders       = 32;
+constexpr size_t pxl__default_fonts         = 16;
+// The pools have room for the objects of pxl itself, on top of the limits.
+// The textures are the white pixel, the canvas, and the texture of the
+// built-in font.
+constexpr size_t pxl__internal_textures = 3;
+constexpr size_t pxl__internal_shaders  = 1;
+constexpr size_t pxl__internal_fonts    = 1;
 // The canvas quad has its own room after the draws of the user.
 constexpr size_t pxl__canvas_vertices = 4;
 constexpr size_t pxl__canvas_indices  = 6;
@@ -2138,16 +2155,18 @@ struct pxl_texture {
   pxl_wrap wrap;
   bool premultiplied;
   bool render_target;
-  /** The next texture to free after the frame. */
-  pxl_texture* next_garbage;
+  /** The next texture in the free list, or in the list to free after the frame.
+   */
+  pxl_texture* next;
 };
 
 struct pxl_shader {
   SDL_GPUShader* handle;
   size_t num_textures;
   bool has_uniforms;
-  /** The next shader to free after the frame. */
-  pxl_shader* next_garbage;
+  /** The next shader in the free list, or in the list to free after the frame.
+   */
+  pxl_shader* next;
 };
 
 struct pxl_font {
@@ -2160,6 +2179,8 @@ struct pxl_font {
   size_t count;
   /** count advances, or nullptr for glyph_width. */
   uint8_t* advances;
+  /** The next font in the free list. */
+  pxl_font* next;
 };
 
 typedef struct pxl__pipeline {
@@ -2204,6 +2225,7 @@ typedef struct pxl__command {
 /** The limits of a context, with the defaults filled in. */
 typedef struct pxl__limits {
   size_t vertices, indices, commands, uniform_bytes, pipelines;
+  size_t textures, shaders, fonts;
 } pxl__limits;
 
 struct pxl_context {
@@ -2243,6 +2265,14 @@ struct pxl_context {
   SDL_GPUBuffer* index_buffer;
   SDL_GPUTransferBuffer* transfer_buffer;
 
+  /** The pools are in the memory of the context. See pxl__layout. */
+  pxl_texture* textures;
+  pxl_texture* free_textures;
+  pxl_shader* shaders;
+  pxl_shader* free_shaders;
+  pxl_font* fonts;
+  pxl_font* free_fonts;
+
   pxl_texture* garbage_textures;
   pxl_shader* garbage_shaders;
 
@@ -2269,6 +2299,10 @@ static pxl__limits pxl__limits_of(const pxl_desc* desc) {
                                                : pxl__default_uniform_bytes,
       .pipelines =
           desc->max_pipelines ? desc->max_pipelines : pxl__default_pipelines,
+      .textures =
+          desc->max_textures ? desc->max_textures : pxl__default_textures,
+      .shaders = desc->max_shaders ? desc->max_shaders : pxl__default_shaders,
+      .fonts   = desc->max_fonts ? desc->max_fonts : pxl__default_fonts,
   };
 }
 
@@ -2276,6 +2310,7 @@ static pxl__limits pxl__limits_of(const pxl_desc* desc) {
 typedef struct pxl__layout {
   pxl__limits limits;
   size_t vertices, indices, commands, uniforms, pipelines;
+  size_t textures, shaders, fonts;
   size_t size;
 } pxl__layout;
 
@@ -2318,9 +2353,15 @@ static bool pxl__make_layout(const pxl_desc* desc,
   size_t index_bytes  = 0;
   size_t geometry     = 0;
   size_t context      = 0;
+  size_t textures     = 0;
+  size_t shaders      = 0;
+  size_t fonts        = 0;
   size_t size         = 0;
   *layout             = (pxl__layout){.limits = limits};
-  bool fits = !ckd_add(&vertices, limits.vertices, pxl__canvas_vertices) &&
+  bool fits = !ckd_add(&textures, limits.textures, pxl__internal_textures) &&
+              !ckd_add(&shaders, limits.shaders, pxl__internal_shaders) &&
+              !ckd_add(&fonts, limits.fonts, pxl__internal_fonts) &&
+              !ckd_add(&vertices, limits.vertices, pxl__canvas_vertices) &&
               !ckd_add(&indices, limits.indices, pxl__canvas_indices) &&
               !ckd_mul(&vertex_bytes, vertices, sizeof(pxl__vertex)) &&
               !ckd_mul(&index_bytes, indices, sizeof(uint32_t)) &&
@@ -2337,7 +2378,13 @@ static bool pxl__make_layout(const pxl_desc* desc,
               pxl__place(&size, &layout->uniforms, limits.uniform_bytes, 1,
                          pxl__uniform_align) &&
               pxl__place(&size, &layout->pipelines, limits.pipelines,
-                         sizeof(pxl__pipeline), alignof(pxl__pipeline));
+                         sizeof(pxl__pipeline), alignof(pxl__pipeline)) &&
+              pxl__place(&size, &layout->textures, textures,
+                         sizeof(pxl_texture), alignof(pxl_texture)) &&
+              pxl__place(&size, &layout->shaders, shaders, sizeof(pxl_shader),
+                         alignof(pxl_shader)) &&
+              pxl__place(&size, &layout->fonts, fonts, sizeof(pxl_font),
+                         alignof(pxl_font));
   if (!fits) {
     return SDL_SetError("pxl: the limits are too large");
   }
@@ -2350,6 +2397,76 @@ static bool pxl__fail(pxl_context* ctx, const char* message) {
   ctx->failed = true;
   SDL_SetError("pxl: %s", message);
   return false;
+}
+
+/** Gives a texture back to the pool. */
+static void pxl__put_texture(pxl_context* ctx, pxl_texture* texture) {
+  texture->next      = ctx->free_textures;
+  ctx->free_textures = texture;
+}
+
+/** Gives a shader back to the pool. */
+static void pxl__put_shader(pxl_context* ctx, pxl_shader* shader) {
+  shader->next      = ctx->free_shaders;
+  ctx->free_shaders = shader;
+}
+
+/** Gives a font back to the pool. */
+static void pxl__put_font(pxl_context* ctx, pxl_font* font) {
+  font->next      = ctx->free_fonts;
+  ctx->free_fonts = font;
+}
+
+/** Takes an empty texture from the pool. Sets the SDL error if it is full. */
+static pxl_texture* pxl__take_texture(pxl_context* ctx) {
+  pxl_texture* texture = ctx->free_textures;
+  if (!texture) {
+    SDL_SetError("pxl: too many textures: raise max_textures");
+    return nullptr;
+  }
+  ctx->free_textures = texture->next;
+  *texture           = (pxl_texture){};
+  return texture;
+}
+
+/** Takes an empty shader from the pool. Sets the SDL error if it is full. */
+static pxl_shader* pxl__take_shader(pxl_context* ctx) {
+  pxl_shader* shader = ctx->free_shaders;
+  if (!shader) {
+    SDL_SetError("pxl: too many shaders: raise max_shaders");
+    return nullptr;
+  }
+  ctx->free_shaders = shader->next;
+  *shader           = (pxl_shader){};
+  return shader;
+}
+
+/** Takes an empty font from the pool. Sets the SDL error if it is full. */
+static pxl_font* pxl__take_font(pxl_context* ctx) {
+  pxl_font* font = ctx->free_fonts;
+  if (!font) {
+    SDL_SetError("pxl: too many fonts: raise max_fonts");
+    return nullptr;
+  }
+  ctx->free_fonts = font->next;
+  *font           = (pxl_font){};
+  return font;
+}
+
+/** Puts all the objects of the pools in the free lists. */
+static void pxl__init_pools(pxl_context* ctx) {
+  size_t textures = ctx->limits.textures + pxl__internal_textures;
+  size_t shaders  = ctx->limits.shaders + pxl__internal_shaders;
+  size_t fonts    = ctx->limits.fonts + pxl__internal_fonts;
+  for (size_t i = textures; i > 0; --i) {
+    pxl__put_texture(ctx, &ctx->textures[i - 1]);
+  }
+  for (size_t i = shaders; i > 0; --i) {
+    pxl__put_shader(ctx, &ctx->shaders[i - 1]);
+  }
+  for (size_t i = fonts; i > 0; --i) {
+    pxl__put_font(ctx, &ctx->fonts[i - 1]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2780,20 +2897,18 @@ static bool pxl__clear_now(pxl_context* ctx, pxl_texture* texture) {
 
 static void pxl__free_texture(pxl_context* ctx, pxl_texture* texture) {
   SDL_ReleaseGPUTexture(ctx->device, texture->handle);
-  PXL_FREE(texture);
+  pxl__put_texture(ctx, texture);
 }
 
-static pxl_texture* pxl__create_texture(pxl_context* ctx,
-                                        const pxl_texture_desc* desc,
-                                        size_t pitch) {
+/**
+ * Fills a texture: creates the GPU texture and uploads the pixels. On
+ * failure the texture has no GPU texture.
+ */
+static bool pxl__init_texture(pxl_context* ctx, pxl_texture* texture,
+                              const pxl_texture_desc* desc, size_t pitch) {
   if (desc->width <= 0 || desc->height <= 0) {
     SDL_SetError("pxl: the texture size must be positive");
-    return nullptr;
-  }
-  pxl_texture* texture = PXL_MALLOC(sizeof *texture);
-  if (!texture) {
-    SDL_OutOfMemory();
-    return nullptr;
+    return false;
   }
   *texture = (pxl_texture){
       .width         = desc->width,
@@ -2818,15 +2933,28 @@ static pxl_texture* pxl__create_texture(pxl_context* ctx,
                        .num_levels           = 1,
                    });
   if (!texture->handle) {
-    PXL_FREE(texture);
-    return nullptr;
+    return false;
   }
   bool filled = desc->render_target && !desc->pixels
                     ? pxl__clear_now(ctx, texture)
                     : pxl__upload(ctx, texture, 0, 0, desc->width, desc->height,
                                   desc->pixels, pitch, desc->premultiplied);
   if (!filled) {
-    pxl__free_texture(ctx, texture);
+    SDL_ReleaseGPUTexture(ctx->device, texture->handle);
+    texture->handle = nullptr;
+  }
+  return filled;
+}
+
+static pxl_texture* pxl__create_texture(pxl_context* ctx,
+                                        const pxl_texture_desc* desc,
+                                        size_t pitch) {
+  pxl_texture* texture = pxl__take_texture(ctx);
+  if (!texture) {
+    return nullptr;
+  }
+  if (!pxl__init_texture(ctx, texture, desc, pitch)) {
+    pxl__put_texture(ctx, texture);
     return nullptr;
   }
   return texture;
@@ -2903,7 +3031,7 @@ void pxl_destroy_texture(pxl_context* ctx, pxl_texture* texture) {
     pxl__forget_texture(&ctx->stack[i], texture);
   }
   if (ctx->in_frame) {
-    texture->next_garbage = ctx->garbage_textures;
+    texture->next         = ctx->garbage_textures;
     ctx->garbage_textures = texture;
   } else {
     pxl__free_texture(ctx, texture);
@@ -2998,7 +3126,7 @@ SDL_GPUTexture* pxl_texture_handle(const pxl_texture* texture) {
 static void pxl__free_shader(pxl_context* ctx, pxl_shader* shader) {
   pxl__release_pipelines(ctx, shader->handle);
   SDL_ReleaseGPUShader(ctx->device, shader->handle);
-  PXL_FREE(shader);
+  pxl__put_shader(ctx, shader);
 }
 
 pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
@@ -3008,9 +3136,8 @@ pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
     SDL_SetError("pxl: too many shader textures");
     return nullptr;
   }
-  pxl_shader* shader = PXL_MALLOC(sizeof *shader);
+  pxl_shader* shader = pxl__take_shader(ctx);
   if (!shader) {
-    SDL_OutOfMemory();
     return nullptr;
   }
   *shader = (pxl_shader){
@@ -3022,7 +3149,7 @@ pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
       pxl__select_code(ctx, &desc->spirv, &desc->dxil, &desc->msl),
       num_textures, desc->has_uniforms ? 1 : 0);
   if (!shader->handle) {
-    PXL_FREE(shader);
+    pxl__put_shader(ctx, shader);
     return nullptr;
   }
   return shader;
@@ -3043,7 +3170,7 @@ void pxl_destroy_shader(pxl_context* ctx, pxl_shader* shader) {
     }
   }
   if (ctx->in_frame) {
-    shader->next_garbage = ctx->garbage_shaders;
+    shader->next         = ctx->garbage_shaders;
     ctx->garbage_shaders = shader;
   } else {
     pxl__free_shader(ctx, shader);
@@ -3056,12 +3183,12 @@ void pxl_destroy_shader(pxl_context* ctx, pxl_shader* shader) {
 /** Frees the textures and shaders that were destroyed during the frame. */
 static void pxl__collect_garbage(pxl_context* ctx) {
   while (ctx->garbage_textures) {
-    pxl_texture* next = ctx->garbage_textures->next_garbage;
+    pxl_texture* next = ctx->garbage_textures->next;
     pxl__free_texture(ctx, ctx->garbage_textures);
     ctx->garbage_textures = next;
   }
   while (ctx->garbage_shaders) {
-    pxl_shader* next = ctx->garbage_shaders->next_garbage;
+    pxl_shader* next = ctx->garbage_shaders->next;
     pxl__free_shader(ctx, ctx->garbage_shaders);
     ctx->garbage_shaders = next;
   }
@@ -3149,16 +3276,22 @@ static bool pxl__update_canvas(pxl_context* ctx) {
   if (ctx->canvas && ctx->canvas->width == w && ctx->canvas->height == h) {
     return true;
   }
-  pxl_texture* canvas = pxl_create_texture(
-      ctx, &(pxl_texture_desc){.width = w, .height = h, .render_target = true});
-  if (!canvas) {
+  const pxl_texture_desc desc = {
+      .width         = w,
+      .height        = h,
+      .render_target = true,
+  };
+  if (!ctx->canvas) {
+    ctx->canvas = pxl_create_texture(ctx, &desc);
+    return ctx->canvas != nullptr;
+  }
+  // The canvas keeps its place in the pool. The old one stays if this fails.
+  pxl_texture resized = {};
+  if (!pxl__init_texture(ctx, &resized, &desc, (size_t)w * 4u)) {
     return false;
   }
-  if (ctx->canvas) {
-    pxl__forget_texture(&ctx->state, ctx->canvas);
-    pxl__free_texture(ctx, ctx->canvas);
-  }
-  ctx->canvas = canvas;
+  SDL_ReleaseGPUTexture(ctx->device, ctx->canvas->handle);
+  *ctx->canvas = resized;
   return true;
 }
 
@@ -3220,8 +3353,12 @@ pxl_context* pxl_create_in(const pxl_desc* desc, void* memory, size_t size) {
       .commands      = (pxl__command*)(bytes + layout.commands),
       .uniforms      = bytes + layout.uniforms,
       .pipelines     = (pxl__pipeline*)(bytes + layout.pipelines),
+      .textures      = (pxl_texture*)(bytes + layout.textures),
+      .shaders       = (pxl_shader*)(bytes + layout.shaders),
+      .fonts         = (pxl_font*)(bytes + layout.fonts),
   };
   ctx->letterbox.a = 255;
+  pxl__init_pools(ctx);
 
   SDL_GPUShaderFormat formats           = SDL_GetGPUShaderFormats(ctx->device);
   const SDL_GPUShaderFormat preferred[] = {
@@ -4139,9 +4276,8 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
     SDL_SetError("pxl: the font texture is too small");
     return nullptr;
   }
-  pxl_font* font = PXL_MALLOC(sizeof *font);
+  pxl_font* font = pxl__take_font(ctx);
   if (!font) {
-    SDL_OutOfMemory();
     return nullptr;
   }
   *font = (pxl_font){
@@ -4157,7 +4293,7 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
   if (desc->advances) {
     font->advances = PXL_MALLOC(count);
     if (!font->advances) {
-      PXL_FREE(font);
+      pxl__put_font(ctx, font);
       SDL_OutOfMemory();
       return nullptr;
     }
@@ -4184,7 +4320,7 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
     pxl_destroy_texture(ctx, font->texture);
   }
   PXL_FREE(font->advances);
-  PXL_FREE(font);
+  pxl__put_font(ctx, font);
 }
 
 /** Frees the built-in font now. */
@@ -4193,7 +4329,7 @@ static void pxl__free_default_font(pxl_context* ctx) {
   if (font) {
     pxl__free_texture(ctx, font->texture);
     PXL_FREE(font->advances);
-    PXL_FREE(font);
+    pxl__put_font(ctx, font);
     ctx->default_font = nullptr;
   }
 }
