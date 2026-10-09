@@ -106,6 +106,53 @@ TEST_CASE(test_allocation_failures) {
   return true;
 }
 
+// Renders the frames of a fixture with composed groups, with each
+// allocation failing in turn. No render may leak.
+static bool check_render_failures(const char* name) {
+  size_t size   = 0;
+  uint8_t* data = read_fixture(name, &size);
+  aseprite_sprite sprite;
+  if (!data || aseprite_load_memory(data, size, &sprite) != ASEPRITE_OK) {
+    free(data);
+    return false;
+  }
+  free(data);
+  sprite.flags |= ASEPRITE_SPRITE_FLAG_GROUP_BLEND;
+  aseprite_color* pixels =
+      malloc(sizeof *pixels * sprite.width * sprite.height);
+  bool ok = pixels != nullptr;
+  for (uint32_t frame = 0; ok && frame < sprite.frame_count; frame++) {
+    allocations        = 0;
+    releases           = 0;
+    failing_allocation = 0;
+    ok =
+        aseprite_render_frame(&sprite, frame, nullptr, pixels) == ASEPRITE_OK &&
+        releases == allocations;
+    size_t needed = allocations;
+    for (size_t i = 1; ok && i <= needed; i++) {
+      allocations        = 0;
+      releases           = 0;
+      failing_allocation = i;
+      ok = aseprite_render_frame(&sprite, frame, nullptr, pixels) ==
+               ASEPRITE_ERROR_NO_MEMORY &&
+           releases == allocations - 1;
+    }
+  }
+  failing_allocation = 0;
+  free(pixels);
+  aseprite_free(&sprite);
+  if (!ok) {
+    fprintf(stderr, "render failure test failed for %s\n", name);
+  }
+  return ok;
+}
+
+TEST_CASE(test_render_allocation_failures) {
+  REQUIRE(check_render_failures("render/order"));
+  REQUIRE(check_render_failures("rgba"));
+  return true;
+}
+
 TEST_CASE(test_custom_assert) {
   size_t before          = asserts;
   aseprite_sprite sprite = {};
@@ -117,6 +164,7 @@ TEST_CASE(test_custom_assert) {
 // Runs all the tests.
 static TEST_SUITE(suite_options) {
   RUN_TEST_CASE(test_allocation_failures);
+  RUN_TEST_CASE(test_render_allocation_failures);
   RUN_TEST_CASE(test_custom_assert);
 }
 

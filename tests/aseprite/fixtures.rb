@@ -418,6 +418,7 @@ module Fixtures
       File.binwrite(File.join(directory, "#{name}.aseprite"), data)
     end
     write_inflate(File.join(directory, "inflate"))
+    RenderFixtures.write(File.join(directory, "render"))
   end
 
   # Raw data and zlib streams for the inflate tests.
@@ -443,5 +444,119 @@ module Fixtures
   end
 end
 
-abort "usage: ruby fixtures.rb OUTPUT_DIR" unless ARGV.size == 1
-Fixtures.write(ARGV[0])
+# Builds the files that test aseprite_render_frame(). Aseprite renders them
+# with the same pixels: `rake compare` checks it.
+module RenderFixtures
+  module_function
+
+  extend Ase
+
+  BLEND_MODES = %w[normal multiply screen overlay darken lighten color_dodge color_burn hard_light soft_light
+                   difference exclusion hue saturation color luminosity addition subtract divide].freeze
+  SPECIAL_VALUES = [0, 1, 127, 128, 254, 255].freeze
+
+  # Makes random pixels. A third of the channels have a value where the blend
+  # functions change their path.
+  def pixels(count, seed, channels: 4, values: 256)
+    random = Random.new(seed)
+    Array.new(count * channels) do
+      random.rand(3).zero? && values == 256 ? SPECIAL_VALUES[random.rand(SPECIAL_VALUES.size)] : random.rand(values)
+    end.pack("C*")
+  end
+
+  def opaque(count, seed) = pixels(count, seed).bytes.each_slice(4).map { |r, g, b, _| [r, g, b, 255] }.flatten.pack("C*")
+
+  # A backdrop and a layer with a blend mode. Each frame has an other cel
+  # opacity.
+  def blend(mode)
+    size = 32
+    frames = [255, 128, 37].each_with_index.map do |opacity, i|
+      layers = i.zero? ? [layer("backdrop"), layer("source", blend: mode, opacity: 200)] : []
+      frame(layers + [image_cel(0, size, size, pixels(size * size, i + 1)),
+                      image_cel(1, size, size, pixels(size * size, 100 + (mode * 3) + i), opacity: opacity)])
+    end
+    file(frames, width: size, height: size)
+  end
+
+  # The drawing order: background, groups, hidden and reference layers,
+  # z-index, linked cels and cels outside the canvas.
+  def order
+    layers = [
+      layer("background", flags: 11), layer("a"), layer("group", type: 1), layer("b", level: 1, blend: 1),
+      layer("hidden", level: 1, flags: 2), layer("hidden group", type: 1, level: 1, flags: 2), layer("c", level: 2),
+      layer("reference", flags: 67), layer("top", blend: 2, opacity: 180)
+    ]
+    frame0 = layers + [
+      image_cel(0, 16, 16, opaque(256, 1)), image_cel(1, 10, 10, pixels(100, 2), x: -3, y: -2),
+      image_cel(3, 12, 8, pixels(96, 3), x: 5, y: 6), image_cel(4, 8, 8, pixels(64, 4), x: 2, y: 2),
+      image_cel(6, 6, 6, pixels(36, 5), x: 4, y: 4), image_cel(7, 16, 16, pixels(256, 6)),
+      image_cel(8, 9, 9, pixels(81, 7), x: 9, y: 9)
+    ]
+    frame1 = [
+      linked_cel(0, 0), image_cel(1, 10, 10, pixels(100, 8), x: 2, y: 1, z_index: 2, opacity: 140),
+      image_cel(3, 12, 8, pixels(96, 9), x: 1, y: 3), image_cel(8, 9, 9, pixels(81, 10), x: 4, y: 5, z_index: -6)
+    ]
+    frame2 = [
+      linked_cel(0, 0), image_cel(1, 10, 10, pixels(100, 11), x: 100, y: 1),
+      image_cel(3, 12, 8, pixels(96, 12), x: -50, y: 3), image_cel(8, 9, 9, pixels(81, 13), x: 3, y: 3, z_index: -100)
+    ]
+    file([frame(frame0), frame(frame1), frame(frame2)], width: 16, height: 16)
+  end
+
+  # Tiles with all flips, the empty tile and a tile that the tileset does not
+  # have, partly outside the canvas.
+  def tiles
+    tile_pixels = ("\0".b * 64) + pixels(48, 20)
+    x_flip = 0x20000000
+    y_flip = 0x40000000
+    d_flip = 0x80000000
+    flips = [0, x_flip, y_flip, d_flip, x_flip | y_flip, x_flip | d_flip, y_flip | d_flip, x_flip | y_flip | d_flip]
+    map = Array.new(30) { |i| i % 7 == 6 ? [0, 99, x_flip][i % 3] : ((i % 3) + 1) | flips[i % 8] }
+    frame0 = [
+      tileset(0, 2 | 4, 4, 4, 4, "tiles", pixels: tile_pixels),
+      layer("under"), layer("map", type: 2, tileset: 0, blend: 3, opacity: 220),
+      image_cel(0, 16, 16, pixels(256, 21)), tilemap_cel(1, 6, 5, map, x: -3, y: 2)
+    ]
+    frame1 = [image_cel(0, 16, 16, pixels(256, 22)), tilemap_cel(1, 6, 5, map.reverse, x: 1, y: -2, opacity: 99)]
+    file([frame(frame0), frame(frame1)], width: 16, height: 16)
+  end
+
+  # An indexed sprite with a background layer. The background shows the
+  # color of the transparent index, also in a frame without a cel.
+  def indexed
+    colors = Array.new(8) { |i| [(i * 37) % 256, (i * 91) % 256, (i * 53) % 256, 255] }
+    frame0 = [
+      palette(8, 0, colors), layer("background", flags: 11), layer("top"),
+      image_cel(0, 12, 12, pixels(144, 30, channels: 1, values: 8)),
+      image_cel(1, 8, 8, pixels(64, 31, channels: 1, values: 8), x: 3, y: 3)
+    ]
+    frame1 = [image_cel(1, 8, 8, pixels(64, 32, channels: 1, values: 8), x: -2, y: 5)]
+    file([frame(frame0), frame(frame1)], width: 12, height: 12, depth: 8, transparent: 2, colors: 8)
+  end
+
+  def grayscale
+    frame0 = [
+      layer("backdrop"), layer("multiply", blend: 1, opacity: 200), layer("screen", blend: 2),
+      layer("difference", blend: 10, opacity: 90),
+      image_cel(0, 16, 16, pixels(256, 40, channels: 2)), image_cel(1, 16, 16, pixels(256, 41, channels: 2)),
+      image_cel(2, 10, 10, pixels(100, 42, channels: 2), x: 3, y: 3, opacity: 150),
+      image_cel(3, 16, 16, pixels(256, 43, channels: 2))
+    ]
+    file([frame(frame0)], width: 16, height: 16, depth: 16)
+  end
+
+  def all
+    blends = BLEND_MODES.each_with_index.to_h { |name, mode| ["blend_#{name}", blend(mode)] }
+    blends.merge("order" => order, "tiles" => tiles, "indexed" => indexed, "grayscale" => grayscale)
+  end
+
+  def write(directory)
+    FileUtils.mkdir_p(directory)
+    all.each { |name, data| File.binwrite(File.join(directory, "#{name}.aseprite"), data) }
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  abort "usage: ruby fixtures.rb OUTPUT_DIR" unless ARGV.size == 1
+  Fixtures.write(ARGV[0])
+end

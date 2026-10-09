@@ -4,10 +4,19 @@ Single-header C23 libraries for game development. Copy one header into your
 project. Define `<NAME>_IMPLEMENTATION` in one C file before you include it.
 All libraries use the [zlib license](LICENSE).
 
-| Library                    | Description                                   |
-| -------------------------- | --------------------------------------------- |
-| [aseprite.h](aseprite.h)   | Reads Aseprite files (`.ase`, `.aseprite`).   |
-| [pxl.h](pxl.h)             | Draws pixel-art games with SDL3 GPU.          |
+| Library                  | Description                                             |
+| ------------------------ | ------------------------------------------------------- |
+| [aseprite.h](aseprite.h) | Reads and renders Aseprite files (`.ase`, `.aseprite`). |
+| [pxl.h](pxl.h)           | Draws pixel-art games with SDL3 GPU.                    |
+
+## aseprite.h
+
+aseprite.h reads all the chunks of a file. `aseprite_render_frame()` blends
+the layers of a frame into RGBA pixels with the same result as Aseprite: all
+19 blend modes, opacity, z-index, groups, tilemaps, indexed and grayscale
+sprites. `rake compare` checks the pixels against Aseprite. The blend
+functions follow Aseprite's `src/doc/blend_funcs.cpp`, which has the MIT
+license; aseprite.h has its notice.
 
 ## pxl.h
 
@@ -59,6 +68,9 @@ CI runs the checks on each pull request: on Linux with gcc and clang, on
 macOS with Apple clang and on Windows with MSYS2 clang. The format check
 uses clang-format 23. The Shaders job checks that the generated files are
 up to date.
+
+`rake compare` compares `aseprite_render_frame()` with Aseprite. It needs
+Aseprite.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
 font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it

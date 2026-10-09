@@ -33,7 +33,9 @@ PACKAGES = { "pxl" => %w[sdl3] }.freeze
 
 # The test programs of each library: program => the C files in tests/<name>/.
 TESTS = {
-  "aseprite" => { "test_aseprite" => %w[test_aseprite consumer], "test_options" => %w[test_options] },
+  "aseprite" => {
+    "test_aseprite" => %w[test_aseprite consumer], "test_render" => %w[test_render], "test_options" => %w[test_options]
+  },
   "pxl" => { "test_pxl" => %w[test_pxl], "test_options" => %w[test_options] },
 }.freeze
 
@@ -247,7 +249,7 @@ task :fuzz, [:seconds] => :fixtures do |_, args|
   compile(tool("CLANG", "clang"), "tests/aseprite/fuzz.c", output,
           %w[-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all])
   mkdir_p corpus
-  cp FileList["#{FIXTURES}/*.aseprite"], corpus
+  cp FileList["#{FIXTURES}/*.aseprite", "#{FIXTURES}/render/*.aseprite"], corpus
   sh output, "-max_total_time=#{seconds}", "-max_len=65536", "-rss_limit_mb=2048", corpus
 end
 
@@ -261,6 +263,26 @@ task :sweep, [:directories] do |_, args|
   output = "#{BUILD}/sweep/sweep"
   compile(compiler, "tests/aseprite/sweep.c", output)
   sh(output, *files, verbose: false) { |ok, _| abort "sweep: some files did not load" unless ok }
+end
+
+# Finds the Aseprite program. ASEPRITE wins, then the macOS app, then PATH.
+def aseprite_program
+  return ENV["ASEPRITE"] if ENV["ASEPRITE"]
+
+  app = "/Applications/Aseprite.app/Contents/MacOS/aseprite"
+  return app if File.executable?(app)
+
+  which("aseprite") || abort("Aseprite not found. Set ASEPRITE to the aseprite program.")
+end
+
+desc "Compare aseprite_render_frame with Aseprite on the fixtures and the files in DIRS"
+task :compare, [:directories] => :fixtures do |_, args|
+  directories = args[:directories]&.split(":") || []
+  files = FileList["#{FIXTURES}/render/*.aseprite"] +
+          directories.flat_map { |dir| Dir.glob(File.join(dir, "**", "*.{ase,aseprite}"), File::FNM_DOTMATCH) }
+  output = "#{BUILD}/compare/render#{EXE}"
+  compile(compiler, "tests/aseprite/render.c", output)
+  ruby "tests/aseprite/compare.rb", aseprite_program, output, "#{BUILD}/compare/frames", *files
 end
 
 desc "Check format, tidy and tests (the definition of done)"
