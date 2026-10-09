@@ -46,7 +46,8 @@ first when a build fails. A library adds rows with `BANNER_ROWS`.
 - Compile with the flags in `compile_flags.txt`, for example
   `$CC @compile_flags.txt -o build/x tests/<name>/x.c`.
 - Compile with clang and with gcc, for example `CC=gcc-16 rake test`. Both
-  must give zero warnings.
+  must give zero warnings. CI does this on Linux, macOS and Windows
+  (`.github/workflows/ci.yml`).
 - clang-tidy and clangd read `compile_flags.txt` automatically.
 - If a library needs a package, add its pkg-config name to `PACKAGES` in the
   Rakefile. The tasks then add its flags.
