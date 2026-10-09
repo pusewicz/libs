@@ -42,6 +42,11 @@ first when a build fails. A library adds rows with `BANNER_ROWS`.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
   `:` between directories. Do not give it `build/`: some test files there
   are not valid on purpose.
+- `rake compare[DIRS]` - render the render fixtures and the files in DIRS
+  with `aseprite_render_frame()` and with the Aseprite program, and compare
+  the pixels. It needs Aseprite: set `ASEPRITE` if it is not found. Run it
+  when you change the rendering, then update the hashes in
+  `tests/aseprite/test_render.c`.
 
 ## Build
 
