@@ -54,7 +54,8 @@
  *
  * Options. Define them before the implementation:
  *
- *   PXL_MALLOC, PXL_FREE  Replace SDL_malloc and SDL_free. Define both or
+ *   PXL_MALLOC, PXL_FREE  Replace SDL_malloc and SDL_free in pxl_create(),
+ *                         the only place that allocates. Define both or
  *                         none.
  *   PXL_ASSERT            Replaces SDL_assert.
  */
@@ -227,6 +228,11 @@ typedef struct pxl_desc {
    * itself do not count. A create function over the limit returns nullptr.
    */
   size_t max_textures, max_shaders, max_fonts;
+  /**
+   * The most bytes of text of one pxl_draw_text() or pxl_measure_text() call,
+   * after the format. 0 uses the default. Longer text is not drawn.
+   */
+  size_t max_text;
 } pxl_desc;
 
 /** The work of the last frame. */
@@ -249,10 +255,9 @@ typedef struct pxl_stats {
 [[__nodiscard__]] size_t pxl_memory_size(const pxl_desc* desc);
 
 /**
- * Creates a context in memory that you give. The context, its frame arrays
- * and its pools of textures, shaders and fonts are in the memory. A copy of
- * the advances of a font and long text still use PXL_MALLOC, and SDL
- * allocates the GPU objects.
+ * Creates a context in memory that you give. The context, its frame arrays,
+ * its pools of textures, shaders and fonts, and its text buffer are in the
+ * memory. pxl does not allocate after this. SDL allocates the GPU objects.
  *
  * @param desc   The settings.
  * @param memory The memory, aligned to alignof(max_align_t). You own it.
@@ -705,8 +710,10 @@ typedef struct pxl_font_desc {
   uint32_t first;
   /** The number of glyphs. 0: all cells. */
   size_t count;
-  /** The advance of each glyph in pixels. nullptr: glyph_width. pxl copies
-   * them. */
+  /**
+   * The advance of each glyph in pixels. nullptr: glyph_width. pxl keeps the
+   * pointer: the array must stay valid until pxl_destroy_font().
+   */
   const uint8_t* advances;
   /** The distance from one line to the next. 0: glyph_height. */
   int line_height;
@@ -2117,6 +2124,7 @@ constexpr size_t pxl__default_pipelines     = 64;
 constexpr size_t pxl__default_textures      = 256;
 constexpr size_t pxl__default_shaders       = 32;
 constexpr size_t pxl__default_fonts         = 16;
+constexpr size_t pxl__default_text          = 1024;
 // The pools have room for the objects of pxl itself, on top of the limits.
 // The textures are the white pixel, the canvas, and the texture of the
 // built-in font.
@@ -2136,7 +2144,6 @@ constexpr int pxl__font_cell_width   = 6;
 constexpr int pxl__font_cell_height  = 10;
 constexpr int pxl__font_grid_columns = 16;
 constexpr int pxl__font_grid_rows    = 6;
-constexpr size_t pxl__format_buffer  = 256;
 
 typedef struct pxl__vertex {
   float x, y, u, v;
@@ -2177,8 +2184,8 @@ struct pxl_font {
   int line_height;
   uint32_t first;
   size_t count;
-  /** count advances, or nullptr for glyph_width. */
-  uint8_t* advances;
+  /** count advances, or nullptr for glyph_width. The caller owns them. */
+  const uint8_t* advances;
   /** The next font in the free list. */
   pxl_font* next;
 };
@@ -2226,6 +2233,7 @@ typedef struct pxl__command {
 typedef struct pxl__limits {
   size_t vertices, indices, commands, uniform_bytes, pipelines;
   size_t textures, shaders, fonts;
+  size_t text;
 } pxl__limits;
 
 struct pxl_context {
@@ -2260,6 +2268,8 @@ struct pxl_context {
   size_t command_count;
   uint8_t* uniforms;
   size_t uniform_size;
+  /** Formats the text of one draw. limits.text + 1 bytes. */
+  char* text;
 
   SDL_GPUBuffer* vertex_buffer;
   SDL_GPUBuffer* index_buffer;
@@ -2303,6 +2313,7 @@ static pxl__limits pxl__limits_of(const pxl_desc* desc) {
           desc->max_textures ? desc->max_textures : pxl__default_textures,
       .shaders = desc->max_shaders ? desc->max_shaders : pxl__default_shaders,
       .fonts   = desc->max_fonts ? desc->max_fonts : pxl__default_fonts,
+      .text    = desc->max_text ? desc->max_text : pxl__default_text,
   };
 }
 
@@ -2310,7 +2321,7 @@ static pxl__limits pxl__limits_of(const pxl_desc* desc) {
 typedef struct pxl__layout {
   pxl__limits limits;
   size_t vertices, indices, commands, uniforms, pipelines;
-  size_t textures, shaders, fonts;
+  size_t textures, shaders, fonts, text;
   size_t size;
 } pxl__layout;
 
@@ -2356,11 +2367,13 @@ static bool pxl__make_layout(const pxl_desc* desc,
   size_t textures     = 0;
   size_t shaders      = 0;
   size_t fonts        = 0;
+  size_t text_bytes   = 0;
   size_t size         = 0;
   *layout             = (pxl__layout){.limits = limits};
   bool fits = !ckd_add(&textures, limits.textures, pxl__internal_textures) &&
               !ckd_add(&shaders, limits.shaders, pxl__internal_shaders) &&
               !ckd_add(&fonts, limits.fonts, pxl__internal_fonts) &&
+              !ckd_add(&text_bytes, limits.text, 1) &&
               !ckd_add(&vertices, limits.vertices, pxl__canvas_vertices) &&
               !ckd_add(&indices, limits.indices, pxl__canvas_indices) &&
               !ckd_mul(&vertex_bytes, vertices, sizeof(pxl__vertex)) &&
@@ -2384,7 +2397,8 @@ static bool pxl__make_layout(const pxl_desc* desc,
               pxl__place(&size, &layout->shaders, shaders, sizeof(pxl_shader),
                          alignof(pxl_shader)) &&
               pxl__place(&size, &layout->fonts, fonts, sizeof(pxl_font),
-                         alignof(pxl_font));
+                         alignof(pxl_font)) &&
+              pxl__place(&size, &layout->text, text_bytes, 1, 1);
   if (!fits) {
     return SDL_SetError("pxl: the limits are too large");
   }
@@ -3356,6 +3370,7 @@ pxl_context* pxl_create_in(const pxl_desc* desc, void* memory, size_t size) {
       .textures      = (pxl_texture*)(bytes + layout.textures),
       .shaders       = (pxl_shader*)(bytes + layout.shaders),
       .fonts         = (pxl_font*)(bytes + layout.fonts),
+      .text          = (char*)(bytes + layout.text),
   };
   ctx->letterbox.a = 255;
   pxl__init_pools(ctx);
@@ -4287,18 +4302,10 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
       .columns      = columns,
       .line_height =
           desc->line_height > 0 ? desc->line_height : desc->glyph_height,
-      .first = desc->first ? desc->first : ' ',
-      .count = count,
+      .first    = desc->first ? desc->first : ' ',
+      .count    = count,
+      .advances = desc->advances,
   };
-  if (desc->advances) {
-    font->advances = PXL_MALLOC(count);
-    if (!font->advances) {
-      pxl__put_font(ctx, font);
-      SDL_OutOfMemory();
-      return nullptr;
-    }
-    memcpy(font->advances, desc->advances, count);
-  }
   return font;
 }
 
@@ -4319,7 +4326,6 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
   if (font->owns_texture) {
     pxl_destroy_texture(ctx, font->texture);
   }
-  PXL_FREE(font->advances);
   pxl__put_font(ctx, font);
 }
 
@@ -4328,7 +4334,6 @@ static void pxl__free_default_font(pxl_context* ctx) {
   pxl_font* font = ctx->default_font;
   if (font) {
     pxl__free_texture(ctx, font->texture);
-    PXL_FREE(font->advances);
     pxl__put_font(ctx, font);
     ctx->default_font = nullptr;
   }
@@ -4346,13 +4351,8 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   constexpr size_t count = SDL_arraysize(pxl__font_rows);
   static_assert(count <= (size_t)pxl__font_grid_columns * pxl__font_grid_rows);
 
-  constexpr size_t size = sizeof(pxl_color) * (size_t)width * (size_t)height;
-  pxl_color* pixels     = PXL_MALLOC(size);
-  if (!pixels) {
-    SDL_OutOfMemory();
-    return nullptr;
-  }
-  memset(pixels, 0, size);
+  constexpr size_t pixel_count  = (size_t)width * (size_t)height;
+  pxl_color pixels[pixel_count] = {};
   for (size_t glyph = 0; glyph < count; ++glyph) {
     size_t left = (glyph % pxl__font_grid_columns) * pxl__font_cell_width;
     size_t top  = (glyph / pxl__font_grid_columns) * pxl__font_cell_height;
@@ -4368,7 +4368,6 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   pxl_texture* texture = pxl_create_texture(
       ctx,
       &(pxl_texture_desc){.width = width, .height = height, .pixels = pixels});
-  PXL_FREE(pixels);
   if (!texture) {
     return nullptr;
   }
@@ -4389,30 +4388,23 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   return font;
 }
 
+static const char pxl__text_error[] =
+    "cannot format the text, or the text is too long: raise max_text";
+
 /**
- * Formats text into `buffer`, or into new memory if `buffer` is too small.
+ * Formats text into the text buffer of the context. The next call replaces
+ * the text.
  *
- * @return The text, or nullptr. Free it with PXL_FREE() if it is not
- *         `buffer`.
+ * @return The text, or nullptr if it cannot be formatted or does not fit.
  */
-PXL_PRINTF(3, 0)
-static char* pxl__vformat(char* buffer, size_t size, const char* format,
-                          va_list args) {
-  va_list copy;
-  va_copy(copy, args);
-  int length = SDL_vsnprintf(buffer, size, format, copy);
-  va_end(copy);
-  if (length < 0) {
+PXL_PRINTF(2, 0)
+static const char* pxl__vformat(const pxl_context* ctx, const char* format,
+                                va_list args) {
+  int length = SDL_vsnprintf(ctx->text, ctx->limits.text + 1, format, args);
+  if (length < 0 || (size_t)length > ctx->limits.text) {
     return nullptr;
   }
-  if ((size_t)length < size) {
-    return buffer;
-  }
-  char* text = PXL_MALLOC((size_t)length + 1);
-  if (text) {
-    SDL_vsnprintf(text, (size_t)length + 1, format, args);
-  }
-  return text;
+  return ctx->text;
 }
 
 /** Reads one UTF-8 code point and moves `text` past it. */
@@ -4520,29 +4512,25 @@ static void pxl__draw_string(pxl_context* ctx, float x, float y,
 void pxl_draw_text(pxl_context* ctx, float x, float y, pxl_color color,
                    const char* format, ...) {
   PXL_ASSERT(ctx && format);
-  char buffer[pxl__format_buffer];
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  const char* text = pxl__vformat(ctx, format, args);
   va_end(args);
   if (!text) {
-    pxl__fail(ctx, "cannot format the text");
+    pxl__fail(ctx, pxl__text_error);
     return;
   }
   pxl__draw_string(ctx, x, y, color, text);
-  if (text != buffer) {
-    PXL_FREE(text);
-  }
 }
 
 pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
   PXL_ASSERT(ctx && format);
-  char buffer[pxl__format_buffer];
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  const char* text = pxl__vformat(ctx, format, args);
   va_end(args);
   if (!text) {
+    SDL_SetError("pxl: %s", pxl__text_error);
     return (pxl_vec2){};
   }
   const pxl_font* font = pxl__font(ctx);
@@ -4561,9 +4549,6 @@ pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
       line += pxl__advance(font, glyph);
       width = fmaxf(width, line);
     }
-  }
-  if (text != buffer) {
-    PXL_FREE(text);
   }
   return (pxl_vec2){
       .x = width,

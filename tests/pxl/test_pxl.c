@@ -622,9 +622,9 @@ TEST_CASE(test_custom_font) {
   const pxl_color pixels[] = {
       red, pxl_transparent, green, green, red, pxl_transparent, green, green,
   };
-  pxl_texture* texture     = own_texture(pxl_create_texture(
+  pxl_texture* texture            = own_texture(pxl_create_texture(
       gpu.pxl, &(pxl_texture_desc){.width = 4, .height = 2, .pixels = pixels}));
-  const uint8_t advances[] = {1, 3};
+  static const uint8_t advances[] = {1, 3};
   pxl_font* font = own_font(pxl_create_font(gpu.pxl, &(pxl_font_desc){
                                                          .texture     = texture,
                                                          .glyph_width = 2,
@@ -937,6 +937,10 @@ static void set_too_many_uniforms(pxl_context* pxl) {
   (void)pxl_set_uniforms(pxl, data, sizeof data);
 }
 
+static void draw_long_text(pxl_context* pxl) {
+  pxl_draw_text(pxl, 0, 0, red, "%s", "123456789");
+}
+
 static void draw_with_two_blends(pxl_context* pxl) {
   pxl_draw_rect(pxl, 0, 0, 1, 1, red);
   pxl_set_blend(pxl, PXL_BLEND_ADD);
@@ -963,6 +967,30 @@ TEST_CASE(test_limits) {
   desc               = limited_desc();
   desc.max_pipelines = 1;
   REQUIRE(check_limit(&desc, draw_with_two_blends));
+
+  desc          = limited_desc();
+  desc.max_text = 8;
+  REQUIRE(check_limit(&desc, draw_long_text));
+  return true;
+}
+
+TEST_CASE(test_text_limit) {
+  pxl_desc desc    = limited_desc();
+  desc.max_text    = 8;
+  pxl_context* pxl = pxl_create_in(&desc, block, pxl_memory_size(&desc));
+  REQUIRE(pxl != nullptr);
+  pxl_vec2 fits = pxl_measure_text(pxl, "%s", "12345678");
+  SDL_ClearError();
+  pxl_vec2 too_big = pxl_measure_text(pxl, "%s", "123456789");
+  bool names_limit = strstr(SDL_GetError(), "max_text") != nullptr;
+  pxl_begin_frame(pxl);
+  pxl_draw_text(pxl, 0, 0, red, "%s", "12345678");
+  bool draws = pxl_end_frame(pxl);
+  pxl_destroy(pxl);
+  REQUIRE(fits.x > 0.0f && fits.y > 0.0f);
+  REQUIRE(too_big.x == 0.0f && too_big.y == 0.0f);
+  REQUIRE(names_limit);
+  REQUIRE(draws);
   return true;
 }
 
@@ -1106,6 +1134,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_resource_errors);
   RUN_TEST_CASE(test_create_in);
   RUN_TEST_CASE(test_limits);
+  RUN_TEST_CASE(test_text_limit);
   RUN_TEST_CASE(test_present_with_full_geometry);
   RUN_TEST_CASE(test_pools);
 }
