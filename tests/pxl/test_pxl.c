@@ -1,5 +1,6 @@
 // Tests for pxl.h. The GPU tests draw into an offscreen canvas and read the
-// pixels back. They need a GPU device; without one they are skipped.
+// pixels back. They need a GPU device; without one they are skipped. Set
+// PXL_TEST_REQUIRE_GPU to make them fail instead.
 
 #define PXL_IMPLEMENTATION
 #include "pxl.h"
@@ -871,17 +872,30 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_resource_errors);
 }
 
+/**
+ * Reports that the GPU tests cannot run, because the SDL function `failed`
+ * failed. Returns false if PXL_TEST_REQUIRE_GPU is set: then they must run.
+ */
+static bool skip_gpu_suite(const char* failed) {
+  if (getenv("PXL_TEST_REQUIRE_GPU") != nullptr) {
+    fprintf(stderr, "%s: %s: PXL_TEST_REQUIRE_GPU is set\n", failed,
+            SDL_GetError());
+    return false;
+  }
+  printf("%s: %s: GPU tests skipped\n", failed, SDL_GetError());
+  return true;
+}
+
 /** Runs the GPU tests. Returns false if pxl fails on a GPU that works. */
 static bool run_gpu_suite() {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
-    printf("SDL_Init: %s: GPU tests skipped\n", SDL_GetError());
-    return true;
+    return skip_gpu_suite("SDL_Init");
   }
   gpu.device = SDL_CreateGPUDevice(pxl_shader_formats, true, nullptr);
   if (!gpu.device) {
-    printf("no GPU device (%s): GPU tests skipped\n", SDL_GetError());
+    bool ok = skip_gpu_suite("SDL_CreateGPUDevice");
     SDL_Quit();
-    return true;
+    return ok;
   }
   printf("GPU driver: %s\n", SDL_GetGPUDeviceDriver(gpu.device));
   gpu.pxl = pxl_create(&(pxl_desc){
