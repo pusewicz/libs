@@ -33,7 +33,11 @@ PACKAGES = { "pxl" => %w[sdl3] }.freeze
 
 # The test programs of each library: program => the C files in tests/<name>/.
 TESTS = {
-  "aseprite" => { "test_aseprite" => %w[test_aseprite consumer], "test_options" => %w[test_options] },
+  "aseprite" => {
+    "test_aseprite" => %w[test_aseprite consumer],
+    "test_options" => %w[test_options],
+    "test_file" => %w[test_file],
+  },
   "pxl" => { "test_pxl" => %w[test_pxl], "test_options" => %w[test_options] },
 }.freeze
 
