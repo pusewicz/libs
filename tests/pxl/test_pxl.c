@@ -622,9 +622,9 @@ TEST_CASE(test_custom_font) {
   const pxl_color pixels[] = {
       red, pxl_transparent, green, green, red, pxl_transparent, green, green,
   };
-  pxl_texture* texture     = own_texture(pxl_create_texture(
+  pxl_texture* texture            = own_texture(pxl_create_texture(
       gpu.pxl, &(pxl_texture_desc){.width = 4, .height = 2, .pixels = pixels}));
-  const uint8_t advances[] = {1, 3};
+  static const uint8_t advances[] = {1, 3};
   pxl_font* font = own_font(pxl_create_font(gpu.pxl, &(pxl_font_desc){
                                                          .texture     = texture,
                                                          .glyph_width = 2,
@@ -835,6 +835,267 @@ TEST_CASE(test_resource_errors) {
 }
 
 // ---------------------------------------------------------------------------
+// Memory
+
+static constexpr size_t block_size = 1 << 16;
+
+/**
+ * The block of the contexts in these tests. They have small limits. It is
+ * aligned by hand, because the Windows C runtime has no aligned_alloc, and it
+ * is not a static array, because the analyzer reads a static array as zero.
+ */
+static unsigned char* block;
+
+static constexpr size_t canary_size   = 64;
+static constexpr unsigned char canary = 0xA5;
+
+/** Gets a desc for the block, with limits that a test lowers. */
+static pxl_desc limited_desc() {
+  return (pxl_desc){
+      .device            = gpu.device,
+      .width             = 8,
+      .height            = 8,
+      .max_vertices      = 64,
+      .max_indices       = 96,
+      .max_commands      = 8,
+      .max_uniform_bytes = 64,
+      .max_pipelines     = 8,
+  };
+}
+
+TEST_CASE(test_create_in) {
+  pxl_desc desc = limited_desc();
+  size_t size   = pxl_memory_size(&desc);
+  REQUIRE(size > 0 && size + canary_size <= block_size);
+  memset(block + size, canary, canary_size);
+
+  REQUIRE(pxl_create_in(&desc, block, size - 1) == nullptr);
+  REQUIRE(pxl_create_in(&desc, nullptr, size) == nullptr);
+
+  // The block is free again after pxl_destroy().
+  for (int round = 0; round < 2; ++round) {
+    pxl_context* pxl = pxl_create_in(&desc, block, size);
+    REQUIRE(pxl != nullptr);
+    pxl_begin_frame(pxl);
+    pxl_clear(pxl, pxl_black);
+    pxl_draw_rect(pxl, 0, 0, 2, 2, red);
+    pxl_color pixels[64];
+    bool ok         = pxl_end_frame(pxl) &&
+                      pxl_read_texture(pxl, pxl_get_canvas(pxl), pixels) &&
+                      same_color(pixels[0], red, 0) &&
+                      same_color(pixels[63], pxl_black, 0);
+    pxl_stats stats = pxl_get_stats(pxl);
+    ok = ok && stats.commands == 2 && stats.vertices == 4 && stats.indices == 6;
+    pxl_destroy(pxl);
+    REQUIRE(ok);
+  }
+  for (size_t i = 0; i < canary_size; ++i) {
+    REQUIRE(block[size + i] == canary);
+  }
+  return true;
+}
+
+/** Draws too much for the limits of limited_desc(), as the test lowered. */
+typedef void overdraw_fn(pxl_context* pxl);
+
+/**
+ * Checks that a frame that goes over a limit fails, and that the next frame
+ * works.
+ */
+static bool check_limit(const pxl_desc* desc, overdraw_fn* overdraw) {
+  size_t size      = pxl_memory_size(desc);
+  pxl_context* pxl = pxl_create_in(desc, block, size);
+  if (!pxl) {
+    return false;
+  }
+  pxl_begin_frame(pxl);
+  overdraw(pxl);
+  bool failed = !pxl_end_frame(pxl);
+  pxl_begin_frame(pxl);
+  pxl_clear(pxl, pxl_black);
+  pxl_draw_rect(pxl, 0, 0, 1, 1, red);
+  bool recovers = pxl_end_frame(pxl);
+  pxl_destroy(pxl);
+  return failed && recovers;
+}
+
+static void draw_three_rects(pxl_context* pxl) {
+  for (int i = 0; i < 3; ++i) {
+    pxl_draw_rect(pxl, (float)i, 0, 1, 1, red);
+  }
+}
+
+static void clear_three_times(pxl_context* pxl) {
+  for (int i = 0; i < 3; ++i) {
+    pxl_clear(pxl, pxl_black);
+  }
+}
+
+static void set_too_many_uniforms(pxl_context* pxl) {
+  static const unsigned char data[64] = {};
+  (void)pxl_set_uniforms(pxl, data, 16);
+  (void)pxl_set_uniforms(pxl, data, sizeof data);
+}
+
+static void draw_long_text(pxl_context* pxl) {
+  pxl_draw_text(pxl, 0, 0, red, "%s", "123456789");
+}
+
+static void draw_with_two_blends(pxl_context* pxl) {
+  pxl_draw_rect(pxl, 0, 0, 1, 1, red);
+  pxl_set_blend(pxl, PXL_BLEND_ADD);
+  pxl_draw_rect(pxl, 1, 0, 1, 1, red);
+}
+
+TEST_CASE(test_limits) {
+  pxl_desc desc     = limited_desc();
+  desc.max_vertices = 8;
+  REQUIRE(check_limit(&desc, draw_three_rects));
+
+  desc             = limited_desc();
+  desc.max_indices = 12;
+  REQUIRE(check_limit(&desc, draw_three_rects));
+
+  desc              = limited_desc();
+  desc.max_commands = 2;
+  REQUIRE(check_limit(&desc, clear_three_times));
+
+  desc                   = limited_desc();
+  desc.max_uniform_bytes = 32;
+  REQUIRE(check_limit(&desc, set_too_many_uniforms));
+
+  desc               = limited_desc();
+  desc.max_pipelines = 1;
+  REQUIRE(check_limit(&desc, draw_with_two_blends));
+
+  desc          = limited_desc();
+  desc.max_text = 8;
+  REQUIRE(check_limit(&desc, draw_long_text));
+  return true;
+}
+
+TEST_CASE(test_text_limit) {
+  pxl_desc desc    = limited_desc();
+  desc.max_text    = 8;
+  pxl_context* pxl = pxl_create_in(&desc, block, pxl_memory_size(&desc));
+  REQUIRE(pxl != nullptr);
+  pxl_vec2 fits = pxl_measure_text(pxl, "%s", "12345678");
+  SDL_ClearError();
+  pxl_vec2 too_big = pxl_measure_text(pxl, "%s", "123456789");
+  bool names_limit = strstr(SDL_GetError(), "max_text") != nullptr;
+  pxl_begin_frame(pxl);
+  pxl_draw_text(pxl, 0, 0, red, "%s", "12345678");
+  bool draws = pxl_end_frame(pxl);
+  pxl_destroy(pxl);
+  REQUIRE(fits.x > 0.0f && fits.y > 0.0f);
+  REQUIRE(too_big.x == 0.0f && too_big.y == 0.0f);
+  REQUIRE(names_limit);
+  REQUIRE(draws);
+  return true;
+}
+
+TEST_CASE(test_present_with_full_geometry) {
+  pxl_desc desc     = limited_desc();
+  desc.max_vertices = 8;
+  desc.max_indices  = 12;
+  size_t size       = pxl_memory_size(&desc);
+  pxl_context* pxl  = pxl_create_in(&desc, block, size);
+  REQUIRE(pxl != nullptr);
+  pxl_texture* screen = pxl_create_texture(
+      pxl,
+      &(pxl_texture_desc){.width = 16, .height = 16, .render_target = true});
+  pxl_color pixels[16 * 16];
+  bool ok = screen != nullptr;
+  if (ok) {
+    pxl_begin_frame(pxl);
+    pxl_clear(pxl, pxl_black);
+    pxl_draw_rect(pxl, 0, 0, 2, 2, red);
+    pxl_draw_rect(pxl, 2, 2, 2, 2, red);
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device);
+    ok                        = cmd != nullptr;
+    if (ok) {
+      ok = pxl_end_frame_into(pxl, cmd, pxl_texture_handle(screen),
+                              SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 16, 16);
+      ok = SDL_SubmitGPUCommandBuffer(cmd) && ok;
+    }
+    ok = ok && pxl_read_texture(pxl, screen, pixels) &&
+         same_color(pixels[0], red, 0) &&
+         same_color(pixels[(15 * 16) + 15], pxl_black, 0);
+  }
+  pxl_destroy_texture(pxl, screen);
+  pxl_destroy(pxl);
+  REQUIRE(ok);
+  return true;
+}
+
+TEST_CASE(test_pools) {
+  pxl_desc desc     = limited_desc();
+  desc.max_textures = 2;
+  desc.max_shaders  = 1;
+  desc.max_fonts    = 1;
+  pxl_context* pxl  = pxl_create_in(&desc, block, pxl_memory_size(&desc));
+  REQUIRE(pxl != nullptr);
+
+  const pxl_color pixels[]       = {red, red, red, red, red, red, red, red};
+  const pxl_texture_desc texture = {.width = 4, .height = 2, .pixels = pixels};
+  pxl_texture* a                 = pxl_create_texture(pxl, &texture);
+  pxl_texture* b                 = pxl_create_texture(pxl, &texture);
+  bool ok                        = a && b && !pxl_create_texture(pxl, &texture);
+
+  // A slot is free again after pxl_destroy_texture(). In a frame, the slot
+  // is free after the frame.
+  pxl_destroy_texture(pxl, a);
+  a  = pxl_create_texture(pxl, &texture);
+  ok = ok && a;
+  pxl_begin_frame(pxl);
+  pxl_destroy_texture(pxl, a);
+  ok = ok && !pxl_create_texture(pxl, &texture);
+  ok = pxl_end_frame(pxl) && ok;
+  a  = pxl_create_texture(pxl, &texture);
+  ok = ok && a;
+
+  pxl_shader* shader = pxl_create_shader(pxl, &slots_frag);
+  ok                 = ok && shader && !pxl_create_shader(pxl, &slots_frag);
+  pxl_destroy_shader(pxl, shader);
+  shader = pxl_create_shader(pxl, &slots_frag);
+  ok     = ok && shader;
+
+  const pxl_font_desc font_desc = {
+      .texture      = b,
+      .glyph_width  = 2,
+      .glyph_height = 2,
+  };
+  pxl_font* font = pxl_create_font(pxl, &font_desc);
+  ok             = ok && font && !pxl_create_font(pxl, &font_desc);
+  pxl_destroy_font(pxl, font);
+  font = pxl_create_font(pxl, &font_desc);
+  ok   = ok && font;
+
+  pxl_destroy_font(pxl, font);
+  pxl_destroy_shader(pxl, shader);
+  pxl_destroy_texture(pxl, a);
+  pxl_destroy_texture(pxl, b);
+  pxl_destroy(pxl);
+  REQUIRE(ok);
+  return true;
+}
+
+TEST_CASE(test_memory_size) {
+  pxl_desc desc = {};
+  size_t normal = pxl_memory_size(&desc);
+  REQUIRE(normal > 0);
+  desc.max_vertices = 128;
+  REQUIRE(pxl_memory_size(&desc) < normal);
+  desc.max_vertices = SIZE_MAX / 2;
+  REQUIRE(pxl_memory_size(&desc) == 0);
+  desc = (pxl_desc){.max_uniform_bytes = (size_t)UINT32_MAX + 1};
+  REQUIRE(pxl_memory_size(&desc) == 0);
+  desc = (pxl_desc){.max_commands = 2};
+  REQUIRE(pxl_memory_size(&desc) < normal);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 
 static TEST_SUITE(suite_cpu) {
@@ -842,6 +1103,7 @@ static TEST_SUITE(suite_cpu) {
   RUN_TEST_CASE(test_transforms);
   RUN_TEST_CASE(test_fit);
   RUN_TEST_CASE(test_circle_spans);
+  RUN_TEST_CASE(test_memory_size);
 }
 
 static TEST_SUITE(suite_gpu) {
@@ -870,6 +1132,11 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_load_texture);
   RUN_TEST_CASE(test_create_errors);
   RUN_TEST_CASE(test_resource_errors);
+  RUN_TEST_CASE(test_create_in);
+  RUN_TEST_CASE(test_limits);
+  RUN_TEST_CASE(test_text_limit);
+  RUN_TEST_CASE(test_present_with_full_geometry);
+  RUN_TEST_CASE(test_pools);
 }
 
 /**
@@ -898,11 +1165,21 @@ static bool run_gpu_suite() {
     return ok;
   }
   printf("GPU driver: %s\n", SDL_GetGPUDeviceDriver(gpu.device));
-  gpu.pxl = pxl_create(&(pxl_desc){
+  gpu.pxl       = pxl_create(&(pxl_desc){
       .device = gpu.device,
       .width  = canvas_size,
       .height = canvas_size,
   });
+  void* storage = malloc(block_size + alignof(max_align_t));
+  if (!storage) {
+    fprintf(stderr, "no memory for the test block\n");
+    pxl_destroy(gpu.pxl);
+    SDL_DestroyGPUDevice(gpu.device);
+    SDL_Quit();
+    return false;
+  }
+  size_t padding = (size_t)(-(uintptr_t)storage) & (alignof(max_align_t) - 1);
+  block          = (unsigned char*)storage + padding;
   if (gpu.pxl) {
     pu_setup(nullptr, destroy_owned);
     RUN_TEST_SUITE(suite_gpu);
@@ -910,6 +1187,7 @@ static bool run_gpu_suite() {
   } else {
     fprintf(stderr, "pxl_create: %s\n", SDL_GetError());
   }
+  free(storage);
   bool created = gpu.pxl != nullptr;
   pxl_destroy(gpu.pxl);
   SDL_DestroyGPUDevice(gpu.device);

@@ -20,16 +20,6 @@ static void* counting_malloc(size_t size) {
   return pointer;
 }
 
-// Counts allocations. It fails the call that the test selects.
-static void* counting_realloc(void* pointer, size_t size) {
-  if (++calls == failing_call) {
-    return nullptr;
-  }
-  void* grown = realloc(pointer, size);
-  blocks += grown && !pointer;
-  return grown;
-}
-
 // Counts releases.
 static void counting_free(void* pointer) {
   blocks -= pointer != nullptr;
@@ -45,7 +35,6 @@ static void counting_assert(bool condition) {
 }
 
 #define PXL_MALLOC(size) counting_malloc(size)
-#define PXL_REALLOC(pointer, size) counting_realloc(pointer, size)
 #define PXL_FREE(pointer) counting_free(pointer)
 #define PXL_ASSERT(condition) counting_assert(condition)
 #define PXL_IMPLEMENTATION
@@ -85,7 +74,7 @@ static bool run_frame() {
   pxl_draw_line(pxl, 0, 0, 31, 31, pxl_white);
   const float uniforms[4] = {};
   ok = pxl_set_uniforms(pxl, uniforms, sizeof uniforms) && ok;
-  pxl_draw_text(pxl, 1, 1, pxl_white, "%300s", "long text on the heap");
+  pxl_draw_text(pxl, 1, 1, pxl_white, "%300s", "long text");
   ok = pxl_end_frame(pxl) && ok;
   pxl_destroy_texture(pxl, texture);
   pxl_destroy(pxl);
@@ -98,7 +87,7 @@ TEST_CASE(test_custom_allocator_and_assert) {
   blocks       = 0;
   asserts      = 0;
   REQUIRE(run_frame());
-  REQUIRE(calls > 0);
+  REQUIRE(calls == 1);
   REQUIRE(blocks == 0);
   REQUIRE(asserts > 0);
   return true;

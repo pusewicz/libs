@@ -1,4 +1,5 @@
-// The smallest pxl program: a 320 x 180 canvas with a sprite and text.
+// The smallest pxl program: a 320 x 180 canvas with a sprite and text. The
+// context lives in a static block, so pxl does not allocate.
 
 #define SDL_MAIN_USE_CALLBACKS
 #define PXL_IMPLEMENTATION
@@ -7,6 +8,8 @@
 
 #include "art.h"
 #include "pxl.h"
+
+alignas(max_align_t) static unsigned char pxl_memory[1 << 17];
 
 typedef struct app {
   SDL_Window* window;
@@ -33,12 +36,26 @@ SDL_AppResult SDL_AppInit(void** state, [[maybe_unused]] int argc,
     SDL_Log("%s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  a->pxl = pxl_create(&(pxl_desc){
-      .device = a->device,
-      .window = a->window,
-      .width  = 320,
-      .height = 180,
-  });
+  const pxl_desc desc = {
+      .device            = a->device,
+      .window            = a->window,
+      .width             = 320,
+      .height            = 180,
+      .max_vertices      = 1024,
+      .max_indices       = 1536,
+      .max_commands      = 16,
+      .max_uniform_bytes = 256,
+      .max_pipelines     = 8,
+      .max_textures      = 4,
+      .max_shaders       = 1,
+      .max_fonts         = 1,
+      .max_text          = 128,
+  };
+  if (pxl_memory_size(&desc) > sizeof pxl_memory) {
+    SDL_Log("pxl needs %u bytes", (unsigned)pxl_memory_size(&desc));
+    return SDL_APP_FAILURE;
+  }
+  a->pxl = pxl_create_in(&desc, pxl_memory, sizeof pxl_memory);
   if (!a->pxl) {
     SDL_Log("%s", SDL_GetError());
     return SDL_APP_FAILURE;

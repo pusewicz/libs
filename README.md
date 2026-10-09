@@ -65,6 +65,11 @@ pxl_end_frame(pxl);
 - Custom fragment shaders with uniforms and extra textures. Compile them with
   `tools/pxl/shaders.rb`.
 - PNG and BMP loading, and texture read-back for screenshots.
+- Fixed memory: the limits in `pxl_desc` set the size of a context, and pxl
+  never grows it. Give your own block to `pxl_create_in()`, sized with
+  `pxl_memory_size()`, and pxl does not allocate. A draw over a limit is
+  dropped and `pxl_end_frame()` returns false. SDL still allocates the GPU
+  objects; `SDL_SetMemoryFunctions()` controls that.
 
 See [`examples/pxl/`](examples/pxl/) and the comments in `pxl.h`.
 
