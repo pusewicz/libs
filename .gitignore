@@ -1,4 +1,5 @@
 /build/
+/swift/.build/
 /compile_commands.json
 /.cache/
 *.o
