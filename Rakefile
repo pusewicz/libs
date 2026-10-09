@@ -2,11 +2,11 @@
 
 # Environment:
 #
-#   CLANG, GCC  The compilers, with flags if needed, for example
-#               "clang --target=x86_64-w64-mingw32".
+#   CC          The C compiler, with flags if needed. Default: cc.
+#   CLANG       The clang of "rake fuzz". It needs libFuzzer, which Apple
+#               clang does not have. Default: Homebrew LLVM clang, or clang.
 #   PKG_CONFIG  The pkg-config program. Default: pkg-config.
 #   SANITIZE=0  Build the tests and the examples without sanitizers.
-#   EXE         The suffix of programs, for example ".exe".
 #
 # Tasks run in parallel. "rake -j N" runs at most N tasks at a time.
 
@@ -21,7 +21,7 @@ SANITIZE = %w[-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-s
 SOURCES = FileList["*.h", "tests/**/*.{c,h}", "examples/**/*.{c,h}"]
 TIDY_SOURCES = FileList["tests/**/*.c", "examples/**/*.c"]
 LLVM = "/opt/homebrew/opt/llvm/bin"
-EXE = ENV.fetch("EXE", "")
+EXE = RbConfig::CONFIG["EXEEXT"]
 
 # The pkg-config packages of each library.
 PACKAGES = { "pxl" => %w[sdl3] }.freeze
@@ -34,9 +34,6 @@ TESTS = {
 
 # The arguments of the test programs of each library.
 TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
-
-# The compilers: name => the environment variable and the programs to find.
-COMPILERS = { "clang" => %w[CLANG clang], "gcc" => %w[GCC gcc-16 gcc-15 gcc] }.freeze
 
 # run captures the output of the tools, so they do not see the terminal. These
 # flags keep their colors.
@@ -74,13 +71,23 @@ def tool(variable, *names)
   names.each do |name|
     llvm = File.join(LLVM, name)
     return llvm if File.executable?(llvm)
-    return name if system("command -v #{name} > /dev/null 2>&1")
+    return name if which(name)
   end
   abort "#{variable}: none of #{names.join(', ')} found"
 end
 
-def compiler(name)
-  tool(*COMPILERS.fetch(name))
+# Returns the absolute path of a program: `name` if it has a directory, else
+# the first match in PATH. Returns nil if there is no program.
+def which(name)
+  dirs = File.dirname(name) == "." ? ENV.fetch("PATH", "").split(File::PATH_SEPARATOR) : [""]
+  paths = dirs.map { _1.empty? ? name : File.join(_1, name) }
+  path = paths.product(["", EXE].uniq).map(&:join).find { File.file?(_1) && File.executable?(_1) }
+  path && File.expand_path(path)
+end
+
+# Returns the C compiler: CC, or cc.
+def compiler
+  ENV.fetch("CC", "cc")
 end
 
 # Returns the library of a file in tests/<name>/ or examples/<name>/.
@@ -145,10 +152,10 @@ end
 
 # Defines a task that compiles C files into a program, and returns its name.
 # The name is the path of the program without EXE, with ":" for "/", for
-# example "build:clang:aseprite:test_aseprite".
-def program_task(compiler_name, sources, output, console: false)
+# example "build:tests:aseprite:test_aseprite".
+def program_task(sources, output, console: false)
   name = output.delete_suffix(EXE).tr("/", ":")
-  task(name) { compile(compiler(compiler_name), sources, output, console: console) }
+  task(name) { compile(compiler, sources, output, console: console) }
   name
 end
 
@@ -161,33 +168,31 @@ task fixtures: "#{FIXTURES}/rgba.aseprite"
 
 test_builds = []
 test_runs = []
-COMPILERS.each_key do |name|
-  TESTS.each do |library, programs|
-    programs.each do |program, files|
-      output = "#{BUILD}/#{name}/#{library}/#{program}#{EXE}"
-      build = program_task(name, files.map { "tests/#{library}/#{_1}.c" }, output, console: true)
-      test_run = task("test:#{name}:#{library}:#{program}" => [:fixtures, build]) do
-        run(output, *TEST_ARGUMENTS.fetch(library, []))
-      end
-      test_builds << build
-      test_runs << test_run.name
+TESTS.each do |library, programs|
+  programs.each do |program, files|
+    output = "#{BUILD}/tests/#{library}/#{program}#{EXE}"
+    build = program_task(files.map { "tests/#{library}/#{_1}.c" }, output, console: true)
+    test_run = task("test:#{library}:#{program}" => [:fixtures, build]) do
+      run(output, *TEST_ARGUMENTS.fetch(library, []))
     end
+    test_builds << build
+    test_runs << test_run.name
   end
 end
 
-desc "Build and run the tests with clang and gcc"
+desc "Build and run the tests"
 multitask test: test_runs
 
 namespace :build do
-  desc "Build the tests with clang and gcc, but do not run them"
+  desc "Build the tests, but do not run them"
   multitask tests: test_builds
 end
 
-example_builds = COMPILERS.keys.product(FileList["examples/**/*.c"].to_a).map do |name, source|
-  program_task(name, source, "#{BUILD}/#{name}/#{source.delete_suffix('.c')}#{EXE}")
+example_builds = FileList["examples/**/*.c"].map do |source|
+  program_task(source, "#{BUILD}/#{source.delete_suffix('.c')}#{EXE}")
 end
 
-desc "Build the examples with clang and gcc"
+desc "Build the examples"
 multitask examples: example_builds
 
 desc "Format the sources"
@@ -217,7 +222,7 @@ task :fuzz, [:seconds] => :fixtures do |_, args|
   seconds = args.fetch(:seconds, "60")
   output = "#{BUILD}/fuzz/fuzz_aseprite"
   corpus = "#{BUILD}/fuzz/corpus"
-  compile(compiler("clang"), "tests/aseprite/fuzz.c", output,
+  compile(tool("CLANG", "clang"), "tests/aseprite/fuzz.c", output,
           %w[-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all])
   mkdir_p corpus
   cp FileList["#{FIXTURES}/*.aseprite"], corpus
@@ -232,7 +237,7 @@ task :sweep, [:directories] do |_, args|
   files = directories.flat_map { |dir| Dir.glob(File.join(dir, "**", "*.{ase,aseprite}"), File::FNM_DOTMATCH) }
   abort "no files found in #{directories.join(', ')}" if files.empty?
   output = "#{BUILD}/sweep/sweep"
-  compile(compiler("clang"), "tests/aseprite/sweep.c", output)
+  compile(compiler, "tests/aseprite/sweep.c", output)
   sh(output, *files, verbose: false) { |ok, _| abort "sweep: some files did not load" unless ok }
 end
 

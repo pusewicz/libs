@@ -51,8 +51,9 @@ pxl.h needs a C23 compiler. It is tested with clang 19 to 23 and gcc 15 and
 
 ## Development
 
-Install Ruby, clang and gcc 15 or newer, pkg-config and SDL3. Then run
-`rake check`.
+Install Ruby, clang 19 or gcc 15 or newer, clang-format, clang-tidy,
+pkg-config and SDL3. Then run `rake check`. `rake test` uses the compiler in
+`CC`, or `cc`.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
 font. It needs glslc, spirv-cross and spirv-val, and DXC or Docker.

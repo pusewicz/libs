@@ -30,8 +30,8 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 
 - `rake check` - the definition of done: format check, clang-tidy, tests
   and examples. Run it before you finish a change.
-- `rake test` - build and run the tests with clang and gcc, with ASan and
-  UBSan.
+- `rake test` - build and run the tests with `$CC` (default: `cc`), with
+  ASan and UBSan.
 - `rake format` - format the sources.
 - `rake fuzz[SECONDS]` - fuzz the parsers with libFuzzer. Clang only.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
@@ -42,12 +42,11 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 
 - Compile with the flags in `compile_flags.txt`, for example
   `$CC @compile_flags.txt -o build/x tests/<name>/x.c`.
-- Compile with clang and with gcc. Both must give zero warnings.
+- Compile with clang and with gcc, for example `CC=gcc-16 rake test`. Both
+  must give zero warnings.
 - clang-tidy and clangd read `compile_flags.txt` automatically.
 - If a library needs a package, add its pkg-config name to `PACKAGES` in the
   Rakefile. The tasks then add its flags.
-- On macOS, use Homebrew LLVM clang and `gcc-16`. Do not use Apple clang. It
-  does not support all of C23. Set `CLANG` or `GCC` to use other compilers.
 - Run `clang-tidy` on the files that define `<NAME>_IMPLEMENTATION`. On the
   header alone, clang-tidy does not check the implementation.
 
