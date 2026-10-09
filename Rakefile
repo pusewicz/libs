@@ -35,6 +35,11 @@ TESTS = {
 # The arguments of the test programs of each library.
 TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
 
+# The environment of the test programs. The Vulkan loader keeps the drivers
+# loaded until exit. Else LeakSanitizer reports their memory as leaks, with no
+# symbols.
+TEST_ENVIRONMENT = { "VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING" => "1" }.freeze
+
 # run captures the output of the tools, so they do not see the terminal. These
 # flags keep their colors.
 COMPILER_COLOR = $stdout.tty? ? %w[-fdiagnostics-color=always] : []
@@ -54,8 +59,10 @@ end
 
 # Runs a command and prints it with its output in one block, so that the
 # output of parallel tasks does not mix. Raises an error if the command fails.
-def run(*command)
-  output, status = Open3.capture2e(*command)
+#
+# env: Extra environment variables of the command.
+def run(*command, env: {})
+  output, status = Open3.capture2e(env, *command)
   OUTPUT_LOCK.synchronize do
     rake_output_message(command.join(" ")) if Rake::FileUtilsExt.verbose_flag
     $stdout.write(output)
@@ -173,7 +180,7 @@ TESTS.each do |library, programs|
     output = "#{BUILD}/tests/#{library}/#{program}#{EXE}"
     build = program_task(files.map { "tests/#{library}/#{_1}.c" }, output, console: true)
     test_run = task("test:#{library}:#{program}" => [:fixtures, build]) do
-      run(output, *TEST_ARGUMENTS.fetch(library, []))
+      run(output, *TEST_ARGUMENTS.fetch(library, []), env: TEST_ENVIRONMENT)
     end
     test_builds << build
     test_runs << test_run.name
