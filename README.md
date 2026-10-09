@@ -8,6 +8,7 @@ All libraries use the [zlib license](LICENSE).
 | ------------------------ | ------------------------------------------------------- |
 | [aseprite.h](aseprite.h) | Reads and renders Aseprite files (`.ase`, `.aseprite`). |
 | [pxl.h](pxl.h)           | Draws pixel-art games with SDL3 GPU.                    |
+| [pxl_anim.h](pxl_anim.h) | Plays sprite animations, for example from Aseprite.     |
 
 ## aseprite.h
 
@@ -57,6 +58,43 @@ See [`examples/pxl/`](examples/pxl/) and the comments in `pxl.h`.
 
 pxl.h needs a C23 compiler. It is tested with clang 19 to 23 and gcc 15 and
 16, and with SDL 3.2 and 3.4. gcc 14 and MSVC do not support enough of C23.
+
+## pxl_anim.h
+
+pxl_anim plays frame animations. `pxl_anim_load_aseprite()` makes a sheet
+from an Aseprite file: the tags become clips and named layers become parts,
+for example a shadow, a body and effects that you draw separately. It
+trims each image and packs it into one atlas. Images that are the same, such
+as a shadow that does not move, share one area of the atlas.
+
+```c
+pxl_anim_sheet sheet;
+pxl_anim_load_aseprite(&sheet, &sprite, &(pxl_anim_aseprite_desc){
+    .parts = (const char*[]){"shadow", "body", "fx"}, .part_count = 3});
+pxl_texture* atlas = pxl_create_texture(pxl, &(pxl_texture_desc){
+    .width = (int)sheet.atlas_width, .height = (int)sheet.atlas_height,
+    .pixels = sheet.atlas});
+
+pxl_anim_player orc = {};
+pxl_anim_play(&orc, &sheet, pxl_anim_find_clip(&sheet, "Walk"));
+pxl_anim_update(&orc, seconds);
+for (uint32_t part = 0; part < sheet.part_count; part++) {
+    pxl_anim_draw(pxl, atlas, &orc, part, &(pxl_sprite){
+        .x = x, .y = y, .origin = {50, 60}, .flip_x = left});
+}
+```
+
+- Forward, reverse and ping-pong clips with a number of passes, or no end,
+  like Aseprite plays them. Change the passes of a clip when you play it.
+- Events for new frames, loops and the end of a clip. `pxl_anim_step()`
+  stops at each frame, so that a slow update does not skip a hit frame.
+- Speed and pause. A long time does not take a long loop.
+- The core uses only the C standard library. Include `aseprite.h` and
+  `pxl.h` before `pxl_anim.h` to get the import and the draw functions.
+
+See [`examples/pxl_anim/character.c`](examples/pxl_anim/character.c). It plays
+the Orc of the free Tiny RPG Character Asset Pack, or any other Aseprite
+file.
 
 ## Development
 
