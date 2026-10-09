@@ -20,25 +20,40 @@ development. Each library is one header file.
 - `examples/<name>/` - the examples for the library.
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
+- `build/` - the build output. Do not commit it.
+
+## Commands
+
+Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
+
+- `rake check` - the definition of done: format check, clang-tidy, tests
+  and examples. Run it before you finish a change.
+- `rake test` - build and run the tests with clang and gcc, with ASan and
+  UBSan.
+- `rake format` - format the sources.
+- `rake fuzz[SECONDS]` - fuzz the parsers with libFuzzer. Clang only.
+- `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
+  `:` between directories. Do not give it `build/`: some test files there
+  are not valid on purpose.
 
 ## Build
 
-There is no build tool yet. Use Rake when you add one. Do not use CMake.
-
-Set `CC` to the compiler. Compile with the flags in `compile_flags.txt`:
-
-```sh
-$CC @compile_flags.txt -o build/<name>_test tests/<name>/<file>.c
-```
-
+- Compile with the flags in `compile_flags.txt`, for example
+  `$CC @compile_flags.txt -o build/x tests/<name>/x.c`.
 - Compile with clang and with gcc. Both must give zero warnings.
 - clang-tidy and clangd read `compile_flags.txt` automatically.
 - On macOS, use Homebrew LLVM clang and `gcc-16`. Do not use Apple clang. It
-  does not support all of C23.
-- Run tests with `-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer`.
-- Before you finish a change, run `clang-format -i` on the files you changed.
-- Run `clang-tidy` on the test file that defines `<NAME>_IMPLEMENTATION`.
-  On the header alone, clang-tidy does not check the implementation.
+  does not support all of C23. Set `CLANG` or `GCC` to use other compilers.
+- Run `clang-tidy` on the files that define `<NAME>_IMPLEMENTATION`. On the
+  header alone, clang-tidy does not check the implementation.
+
+## Tests
+
+- Use pico_unit (`third_party/pico_unit.h`).
+- Do not commit binary test files. A Ruby script in `tests/<name>/` writes
+  them to `build/`.
+- Test the error paths too: truncated data, bad values and failed
+  allocations.
 
 ## Header structure
 
@@ -58,8 +73,9 @@ Use the STB pattern:
   purpose, the parameters, the return value and who owns the memory.
 - Use only the C standard library. Put optional dependencies behind a
   `<NAME>_` macro.
-- Let the user replace allocation and assertions with `<NAME>_MALLOC`,
-  `<NAME>_REALLOC`, `<NAME>_FREE` and `<NAME>_ASSERT`.
+- Let the user replace the allocation functions that the library uses and
+  the assertions, for example with `<NAME>_MALLOC`, `<NAME>_FREE` and
+  `<NAME>_ASSERT`.
 - Do not use global mutable state. Keep state in a context that the user
   owns.
 

@@ -1,4 +1,8 @@
 ---
+# Disabled checks that conflict with C:
+# - invalid-enum-default-initialization: AGENTS.md asks for `= {}`.
+# - multi-level-implicit-pointer-conversion: void * converts implicitly.
+# - DeprecatedOrUnsafeBufferHandling: asks for optional Annex K functions.
 Checks: >
   -*,
   bugprone-*,
@@ -23,7 +27,10 @@ Checks: >
   -readability-implicit-bool-conversion,
   -readability-simplify-boolean-expr,
   -readability-use-concise-preprocessor-directives,
-  -clang-analyzer-core.uninitialized.Assign
+  -clang-analyzer-core.uninitialized.Assign,
+  -bugprone-invalid-enum-default-initialization,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 
 WarningsAsErrors: "*"
 HeaderFilterRegex: ".*"
@@ -42,6 +49,8 @@ CheckOptions:
     value: UPPER_CASE
   - key: readability-identifier-naming.MacroDefinitionCase
     value: UPPER_CASE
+  - key: bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
+    value: true
   - key: readability-function-size.LineThreshold
     value: "200"
 ---
