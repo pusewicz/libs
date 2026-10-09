@@ -19,25 +19,25 @@ development. Each library is one header file.
 - `tests/<name>/` - the tests for the library.
 - `examples/<name>/` - the examples for the library.
 - `tools/<name>/` - the sources and scripts that generate parts of the
-  library, and its Rake tasks (`<name>.rake`).
-- `tools/linux/`, `tools/windows/` - the Docker images of `rake linux` and
-  `rake windows`.
+  library.
+- `rakelib/<name>.rake` - the Rake tasks of the library. Rake loads them
+  automatically.
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
 - `build/` - the build output. Do not commit it.
 
 ## Commands
 
-Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
+Rake drives the build. `rake -T` lists the tasks. Do not use CMake. Rake
+first prints a banner: the host, the compiler, the flags, the packages, the
+test environment and the tools, with their paths and versions. Read it
+first when a build fails. A library adds rows with `BANNER_ROWS`.
 
 - `rake check` - the definition of done: format check, clang-tidy, tests
   and examples. Run it before you finish a change.
-- `rake test` - build and run the tests with clang and gcc, with ASan and
-  UBSan.
+- `rake test` - build and run the tests with `$CC` (default: `cc`), with
+  ASan and UBSan.
 - `rake format` - format the sources.
-- `rake linux` - run clang-tidy, the tests and the examples on Linux, in
-  Docker.
-- `rake windows` - build the tests and the examples for Windows, in Docker.
 - `rake fuzz[SECONDS]` - fuzz the parsers with libFuzzer. Clang only.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
   `:` between directories. Do not give it `build/`: some test files there
@@ -47,12 +47,12 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 
 - Compile with the flags in `compile_flags.txt`, for example
   `$CC @compile_flags.txt -o build/x tests/<name>/x.c`.
-- Compile with clang and with gcc. Both must give zero warnings.
+- Compile with clang and with gcc, for example `CC=gcc-16 rake test`. Both
+  must give zero warnings. CI does this on Linux, macOS and Windows
+  (`.github/workflows/ci.yml`).
 - clang-tidy and clangd read `compile_flags.txt` automatically.
 - If a library needs a package, add its pkg-config name to `PACKAGES` in the
   Rakefile. The tasks then add its flags.
-- On macOS, use Homebrew LLVM clang and `gcc-16`. Do not use Apple clang. It
-  does not support all of C23. Set `CLANG` or `GCC` to use other compilers.
 - Run `clang-tidy` on the files that define `<NAME>_IMPLEMENTATION`. On the
   header alone, clang-tidy does not check the implementation.
 

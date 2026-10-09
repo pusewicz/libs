@@ -3,8 +3,8 @@
 # Tasks that generate parts of pxl.h, and the shaders of its tests and
 # examples.
 
-require_relative "font"
-require_relative "shaders"
+require_relative "../tools/pxl/font"
+require_relative "../tools/pxl/shaders"
 
 module Pxl
   HEADER = "pxl.h"
@@ -29,9 +29,27 @@ module Pxl
   end
 
   def dxc
-    @dxc ||= PxlShaders.dxc_command(WORK_DIR, CACHE_DIR)
+    @dxc ||= PxlShaders.dxc_command(CACHE_DIR, WORK_DIR)
+  end
+
+  # Returns the DXC of "rake pxl:generate" for the banner. It does not
+  # download DXC.
+  def describe_dxc
+    user = PxlShaders.user_dxc
+    return describe(user.shelljoin) if user
+
+    release = PxlShaders.release_dxc(CACHE_DIR)
+    version = "release #{PxlShaders::DXC_VERSION}, #{File.exist?(release) ? release : 'downloads on first use'}"
+    case PxlShaders.release_mode
+    when :native then version
+    when :docker then "#{version}, runs in Docker: #{describe('docker')}"
+    else "not found"
+    end
   end
 end
+
+%w[glslc spirv-cross spirv-val].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
+BANNER_ROWS["DXC"] = -> { Pxl.describe_dxc }
 
 namespace :pxl do
   desc "Compile the built-in shaders and embed them in pxl.h"

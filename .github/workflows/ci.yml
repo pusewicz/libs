@@ -1,0 +1,126 @@
+# Runs the checks of `rake check` on each pull request and on main, natively
+# on Linux, macOS and Windows. The format check runs once, with a fixed
+# clang-format, because versions format differently.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Each runner has a GPU device, so the pxl GPU tests must run.
+  PXL_TEST_REQUIRE_GPU: 1
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: pipx install clang-format==23.1.3
+      - run: rake format:check
+
+  # Generates the shaders and the font of pxl.h again. If the files in git
+  # are different, it fails and uploads the new files.
+  shaders:
+    name: Shaders
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends glslc spirv-cross spirv-tools
+      - run: rake pxl:generate
+      - id: diff
+        run: git diff --stat --exit-code
+      - if: failure() && steps.diff.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generated
+          path: |
+            pxl.h
+            tests/pxl/test_shaders.h
+            examples/pxl/example_shaders.h
+
+  linux:
+    name: Linux (${{ matrix.cc }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+      # Lavapipe is the GPU: Vulkan on the CPU, without a display.
+      SDL_VIDEO_DRIVER: offscreen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libclang-rt-dev libsdl3-dev mesa-vulkan-drivers vulkan-validationlayers
+      - if: matrix.cc == 'clang'
+        run: rake tidy
+        env:
+          # clang-tidy 22 and newer skip the system headers. That is faster
+          # and does not count thousands of hidden warnings.
+          CLANG_TIDY: clang-tidy-22
+      - run: rake test
+      - run: rake examples
+
+  macos:
+    name: macOS (clang)
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install packages
+        run: brew install llvm sdl3
+      - run: rake tidy
+      - run: rake test
+      - run: rake examples
+
+  windows:
+    name: Windows (clang)
+    runs-on: windows-2025
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      CC: clang
+    steps:
+      - name: Check out with LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: CLANG64
+          pacboy: clang:p clang-tools-extra:p compiler-rt:p pkgconf:p ruby:p sdl3:p
+      - run: rake tidy
+      - run: rake test
+      - run: rake examples

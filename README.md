@@ -42,20 +42,25 @@ See [`examples/pxl/`](examples/pxl/) and the comments in `pxl.h`.
 
 | Backend | Status |
 | --- | --- |
-| Metal (macOS) | Tested |
-| Vulkan (Linux) | Tested on lavapipe with the validation layers |
-| Direct3D 12 (Windows) | Builds with MinGW gcc and clang. DXC validates the shaders. Not run yet. |
+| Metal (macOS) | Tested, also in CI |
+| Vulkan (Linux) | Tested in CI on lavapipe with the validation layers |
+| Direct3D 12 (Windows) | Tested in CI with MSYS2 clang, on a runner without a GPU. DXC validates the shaders. |
 
 pxl.h needs a C23 compiler. It is tested with clang 19 to 23 and gcc 15 and
 16, and with SDL 3.2 and 3.4. gcc 14 and MSVC do not support enough of C23.
 
 ## Development
 
-Install Ruby, clang and gcc 15 or newer, pkg-config and SDL3. Then run
-`rake check`.
+Install Ruby, clang 19 or gcc 15 or newer, clang-format, clang-tidy,
+pkg-config and SDL3. Then run `rake check`. `rake test` uses the compiler in
+`CC`, or `cc`.
 
-`rake linux` runs clang-tidy, the tests and the examples on Linux, and
-`rake windows` builds for Windows. Both use Docker.
+CI runs the checks on each pull request: on Linux with gcc and clang, on
+macOS with Apple clang and on Windows with MSYS2 clang. The format check
+uses clang-format 23. The Shaders job checks that the generated files are
+up to date.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
-font. It needs glslc, spirv-cross and spirv-val, and DXC or Docker.
+font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it
+downloads the DXC release for Linux. It runs it directly on Linux x86_64, and
+in Docker on macOS.
