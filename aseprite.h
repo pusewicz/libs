@@ -2495,6 +2495,9 @@ static aseprite_result aseprite_read_user_data_chunk(aseprite_parser* parser,
     }
     break;
   }
+  if (!user_data) {
+    return ASEPRITE_OK;
+  }
   return aseprite_read_user_data(parser, reader, user_data);
 }
 
