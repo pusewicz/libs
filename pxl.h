@@ -1,6 +1,6 @@
 /*
  * pxl.h - a 2D renderer for pixel-art games, on top of SDL3 GPU.
- * Version 0.1.0
+ * Version 0.2.0
  * SPDX-License-Identifier: Zlib
  *
  * pxl draws sprites, shapes and text into a small canvas, then scales the
