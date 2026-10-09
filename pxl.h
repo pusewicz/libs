@@ -46,11 +46,17 @@
  *
  * The header has a pxl_shader_desc for each shader. See pxl_create_shader().
  *
+ * Memory: the limits in pxl_desc fix the memory of a context. pxl_create()
+ * allocates it once. To give your own memory, for example a static array or
+ * an arena, call pxl_memory_size() and pxl_create_in(). pxl never grows its
+ * memory. SDL allocates the GPU objects, outside of this: to control that,
+ * call SDL_SetMemoryFunctions() before the first SDL call.
+ *
  * Options. Define them before the implementation:
  *
- *   PXL_MALLOC, PXL_REALLOC, PXL_FREE  Replace SDL_malloc, SDL_realloc and
- *                                      SDL_free. Define all three or none.
- *   PXL_ASSERT                         Replaces SDL_assert.
+ *   PXL_MALLOC, PXL_FREE  Replace SDL_malloc and SDL_free. Define both or
+ *                         none.
+ *   PXL_ASSERT            Replaces SDL_assert.
  */
 
 #ifndef PXL_H
@@ -201,6 +207,19 @@ typedef struct pxl_desc {
   pxl_scale_mode scale_mode;
   /** The color around the canvas. pxl ignores the alpha. */
   pxl_color letterbox;
+  /**
+   * The limits of one frame. 0 uses the default. pxl reserves the memory for
+   * the limits when it creates the context, and never grows it. A draw over
+   * a limit does not happen, and pxl_end_frame() returns false.
+   * pxl_get_stats() shows what the last frame used.
+   */
+  size_t max_vertices, max_indices, max_commands, max_uniform_bytes;
+  /**
+   * The most pipelines in the cache. 0 uses the default. A pipeline is for
+   * one shader, one blend mode and one target format. A draw that needs one
+   * more fails.
+   */
+  size_t max_pipelines;
 } pxl_desc;
 
 /** The work of the last frame. */
@@ -209,10 +228,35 @@ typedef struct pxl_stats {
   size_t passes;
   size_t vertices;
   size_t indices;
+  size_t commands;
+  size_t uniform_bytes;
 } pxl_stats;
 
 /**
- * Creates a context.
+ * Gets the size of the memory that pxl_create_in() needs. It uses only the
+ * limits of desc, so it works before you have a GPU device.
+ *
+ * @param desc The settings.
+ * @return The size in bytes, or 0 if the limits are too large.
+ */
+[[__nodiscard__]] size_t pxl_memory_size(const pxl_desc* desc);
+
+/**
+ * Creates a context in memory that you give. pxl does not allocate memory for
+ * the context. It still creates textures, shaders and fonts with the
+ * allocator of the build, and SDL allocates the GPU objects.
+ *
+ * @param desc   The settings.
+ * @param memory The memory, aligned to alignof(max_align_t). You own it.
+ *               Keep it until pxl_destroy(), then you can reuse or free it.
+ * @param size   The size of memory in bytes, at least pxl_memory_size(desc).
+ * @return The context, or nullptr. Free it with pxl_destroy().
+ */
+[[__nodiscard__]] pxl_context* pxl_create_in(const pxl_desc* desc, void* memory,
+                                             size_t size);
+
+/**
+ * Creates a context. It allocates pxl_memory_size(desc) bytes with PXL_MALLOC.
  *
  * @param desc The settings.
  * @return The context, or nullptr. Free it with pxl_destroy().
@@ -221,7 +265,9 @@ typedef struct pxl_stats {
 
 /**
  * Destroys a context and releases its window. Destroy the textures and
- * shaders of the context first. The device and the window stay.
+ * shaders of the context first. The device and the window stay. A context
+ * from pxl_create() frees its memory. A context from pxl_create_in() leaves
+ * the memory to you.
  *
  * @param ctx The context, or nullptr.
  */
@@ -783,13 +829,12 @@ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size);
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(PXL_MALLOC) || defined(PXL_REALLOC) || defined(PXL_FREE)
-#if !defined(PXL_MALLOC) || !defined(PXL_REALLOC) || !defined(PXL_FREE)
-#error "Define all of PXL_MALLOC, PXL_REALLOC and PXL_FREE, or none."
+#if defined(PXL_MALLOC) != defined(PXL_FREE)
+#error "Define both PXL_MALLOC and PXL_FREE, or none of them."
 #endif
-#else
+
+#ifndef PXL_MALLOC
 #define PXL_MALLOC(size) SDL_malloc(size)
-#define PXL_REALLOC(pointer, size) SDL_realloc(pointer, size)
 #define PXL_FREE(pointer) SDL_free(pointer)
 #endif
 
@@ -2052,9 +2097,18 @@ static const uint8_t pxl__font_advances[95] = {
 // END GENERATED FONT
 
 constexpr size_t pxl__stack_capacity = 32;
-constexpr size_t pxl__min_capacity   = 256;
 constexpr size_t pxl__uniform_align  = 16;
 constexpr int pxl__max_radius        = 1 << 14;
+
+// The defaults of the limits in pxl_desc.
+constexpr size_t pxl__default_vertices      = 65536;
+constexpr size_t pxl__default_indices       = 98304;
+constexpr size_t pxl__default_commands      = 1024;
+constexpr size_t pxl__default_uniform_bytes = 65536;
+constexpr size_t pxl__default_pipelines     = 64;
+// The canvas quad has its own room after the draws of the user.
+constexpr size_t pxl__canvas_vertices = 4;
+constexpr size_t pxl__canvas_indices  = 6;
 /** Floats hold all whole numbers up to this. */
 constexpr float pxl__coordinate_limit = 16777216.0f;
 
@@ -2147,10 +2201,18 @@ typedef struct pxl__command {
   uint32_t first_index, index_count;
 } pxl__command;
 
+/** The limits of a context, with the defaults filled in. */
+typedef struct pxl__limits {
+  size_t vertices, indices, commands, uniform_bytes, pipelines;
+} pxl__limits;
+
 struct pxl_context {
   SDL_GPUDevice* device;
   SDL_Window* window;
   bool claimed_window;
+  /** pxl_destroy() frees the memory of this context. */
+  bool owns_memory;
+  pxl__limits limits;
   SDL_GPUShaderFormat shader_format;
   SDL_GPUShader* vertex_shader;
   pxl_shader* default_shader;
@@ -2165,23 +2227,21 @@ struct pxl_context {
   pxl_rect viewport;
   float pixel_density;
 
+  /** The arrays are in the memory of the context. See pxl__layout. */
   pxl__pipeline* pipelines;
-  size_t pipeline_count, pipeline_capacity;
+  size_t pipeline_count;
   pxl__vertex* vertices;
-  size_t vertex_count, vertex_capacity;
+  size_t vertex_count;
   uint32_t* indices;
-  size_t index_count, index_capacity;
+  size_t index_count;
   pxl__command* commands;
-  size_t command_count, command_capacity;
+  size_t command_count;
   uint8_t* uniforms;
-  size_t uniform_size, uniform_capacity;
+  size_t uniform_size;
 
   SDL_GPUBuffer* vertex_buffer;
-  size_t vertex_buffer_size;
   SDL_GPUBuffer* index_buffer;
-  size_t index_buffer_size;
   SDL_GPUTransferBuffer* transfer_buffer;
-  size_t transfer_buffer_size;
 
   pxl_texture* garbage_textures;
   pxl_shader* garbage_shaders;
@@ -2197,32 +2257,92 @@ struct pxl_context {
 // ---------------------------------------------------------------------------
 // Memory
 
+/** Gets the limits of a desc, with the defaults for the zeros. */
+static pxl__limits pxl__limits_of(const pxl_desc* desc) {
+  return (pxl__limits){
+      .vertices =
+          desc->max_vertices ? desc->max_vertices : pxl__default_vertices,
+      .indices = desc->max_indices ? desc->max_indices : pxl__default_indices,
+      .commands =
+          desc->max_commands ? desc->max_commands : pxl__default_commands,
+      .uniform_bytes = desc->max_uniform_bytes ? desc->max_uniform_bytes
+                                               : pxl__default_uniform_bytes,
+      .pipelines =
+          desc->max_pipelines ? desc->max_pipelines : pxl__default_pipelines,
+  };
+}
+
+/** Where the arrays of a context are in its memory. */
+typedef struct pxl__layout {
+  pxl__limits limits;
+  size_t vertices, indices, commands, uniforms, pipelines;
+  size_t size;
+} pxl__layout;
+
 /**
- * Grows an array to hold at least `needed` items.
+ * Adds an array to the end of a layout.
  *
- * @return The new array, or nullptr. On success, *capacity is the new
- *         capacity. On failure, the old array stays valid.
+ * @param size      The size of the layout so far. It grows.
+ * @param offset    Receives the offset of the array.
+ * @param alignment A power of two.
+ * @return false if the layout is too large.
  */
-[[nodiscard]] static void* pxl__grow(void* data, size_t item_size,
-                                     size_t needed, size_t capacity[static 1]) {
-  if (needed <= *capacity) {
-    return data;
-  }
-  size_t count = *capacity ? *capacity : pxl__min_capacity;
-  while (count < needed) {
-    if (ckd_mul(&count, count, 2)) {
-      return nullptr;
-    }
-  }
+static bool pxl__place(size_t size[static 1], size_t offset[static 1],
+                       size_t count, size_t item_size, size_t alignment) {
+  size_t start = 0;
   size_t bytes = 0;
-  if (ckd_mul(&bytes, count, item_size)) {
-    return nullptr;
+  if (ckd_add(&start, *size, alignment - 1) ||
+      ckd_mul(&bytes, count, item_size)) {
+    return false;
   }
-  void* grown = PXL_REALLOC(data, bytes);
-  if (grown) {
-    *capacity = count;
+  start &= ~(alignment - 1);
+  if (ckd_add(size, start, bytes)) {
+    return false;
   }
-  return grown;
+  *offset = start;
+  return true;
+}
+
+/**
+ * Plans the memory of a context. The GPU buffers of the geometry have 32-bit
+ * sizes, so the geometry must fit in them.
+ *
+ * @return false, and sets the SDL error, if the limits are too large.
+ */
+static bool pxl__make_layout(const pxl_desc* desc,
+                             pxl__layout layout[static 1]) {
+  pxl__limits limits  = pxl__limits_of(desc);
+  size_t vertices     = 0;
+  size_t indices      = 0;
+  size_t vertex_bytes = 0;
+  size_t index_bytes  = 0;
+  size_t geometry     = 0;
+  size_t context      = 0;
+  size_t size         = 0;
+  *layout             = (pxl__layout){.limits = limits};
+  bool fits = !ckd_add(&vertices, limits.vertices, pxl__canvas_vertices) &&
+              !ckd_add(&indices, limits.indices, pxl__canvas_indices) &&
+              !ckd_mul(&vertex_bytes, vertices, sizeof(pxl__vertex)) &&
+              !ckd_mul(&index_bytes, indices, sizeof(uint32_t)) &&
+              !ckd_add(&geometry, vertex_bytes, index_bytes) &&
+              geometry <= UINT32_MAX && limits.uniform_bytes <= UINT32_MAX &&
+              pxl__place(&size, &context, 1, sizeof(pxl_context),
+                         alignof(max_align_t)) &&
+              pxl__place(&size, &layout->vertices, vertices,
+                         sizeof(pxl__vertex), alignof(pxl__vertex)) &&
+              pxl__place(&size, &layout->indices, indices, sizeof(uint32_t),
+                         alignof(uint32_t)) &&
+              pxl__place(&size, &layout->commands, limits.commands,
+                         sizeof(pxl__command), alignof(pxl__command)) &&
+              pxl__place(&size, &layout->uniforms, limits.uniform_bytes, 1,
+                         pxl__uniform_align) &&
+              pxl__place(&size, &layout->pipelines, limits.pipelines,
+                         sizeof(pxl__pipeline), alignof(pxl__pipeline));
+  if (!fits) {
+    return SDL_SetError("pxl: the limits are too large");
+  }
+  layout->size = size;
+  return true;
 }
 
 /** Marks the frame as failed. Returns false. */
@@ -2431,14 +2551,10 @@ static SDL_GPUGraphicsPipeline* pxl__get_pipeline(pxl_context* ctx,
       return p->handle;
     }
   }
-  pxl__pipeline* pipelines =
-      pxl__grow(ctx->pipelines, sizeof *ctx->pipelines, ctx->pipeline_count + 1,
-                &ctx->pipeline_capacity);
-  if (!pipelines) {
-    SDL_OutOfMemory();
+  if (ctx->pipeline_count == ctx->limits.pipelines) {
+    SDL_SetError("pxl: too many pipelines: raise max_pipelines");
     return nullptr;
   }
-  ctx->pipelines = pipelines;
 
   const SDL_GPUVertexAttribute attributes[] = {
       {
@@ -2538,61 +2654,31 @@ static SDL_GPUTextureSamplerBinding pxl__binding(const pxl_context* ctx,
   };
 }
 
-/** Grows a GPU buffer to hold `size` bytes. Drops the old content. */
-static bool pxl__reserve_buffer(pxl_context* ctx, SDL_GPUBuffer** buffer,
-                                size_t capacity[static 1], size_t size,
-                                SDL_GPUBufferUsageFlags usage) {
-  if (size <= *capacity) {
-    return true;
-  }
-  size_t grown = pxl__min_capacity * sizeof(pxl__vertex);
-  while (grown < size) {
-    if (ckd_mul(&grown, grown, 2)) {
-      return SDL_SetError("pxl: buffer too large");
-    }
-  }
-  if (grown > UINT32_MAX) {
-    return SDL_SetError("pxl: buffer too large");
-  }
-  SDL_GPUBuffer* created = SDL_CreateGPUBuffer(
-      ctx->device,
-      &(SDL_GPUBufferCreateInfo){.usage = usage, .size = (Uint32)grown});
-  if (!created) {
-    return false;
-  }
-  SDL_ReleaseGPUBuffer(ctx->device, *buffer);
-  *buffer   = created;
-  *capacity = grown;
-  return true;
-}
-
-/** Grows the transfer buffer to hold `size` bytes. */
-static bool pxl__reserve_transfer(pxl_context* ctx, size_t size) {
-  if (size <= ctx->transfer_buffer_size) {
-    return true;
-  }
-  size_t grown = ctx->transfer_buffer_size ? ctx->transfer_buffer_size
-                                           : pxl__min_capacity * 64;
-  while (grown < size) {
-    if (ckd_mul(&grown, grown, 2)) {
-      return SDL_SetError("pxl: buffer too large");
-    }
-  }
-  if (grown > UINT32_MAX) {
-    return SDL_SetError("pxl: buffer too large");
-  }
-  SDL_GPUTransferBuffer* created = SDL_CreateGPUTransferBuffer(
+/**
+ * Creates the GPU buffers for the geometry of a frame, at their final size.
+ * pxl__make_layout() has checked that the sizes fit in 32 bits.
+ */
+static bool pxl__create_geometry_buffers(pxl_context* ctx) {
+  size_t vertex_bytes =
+      (ctx->limits.vertices + pxl__canvas_vertices) * sizeof(pxl__vertex);
+  size_t index_bytes =
+      (ctx->limits.indices + pxl__canvas_indices) * sizeof(uint32_t);
+  ctx->vertex_buffer =
+      SDL_CreateGPUBuffer(ctx->device, &(SDL_GPUBufferCreateInfo){
+                                           .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                           .size  = (Uint32)vertex_bytes,
+                                       });
+  ctx->index_buffer =
+      SDL_CreateGPUBuffer(ctx->device, &(SDL_GPUBufferCreateInfo){
+                                           .usage = SDL_GPU_BUFFERUSAGE_INDEX,
+                                           .size  = (Uint32)index_bytes,
+                                       });
+  ctx->transfer_buffer = SDL_CreateGPUTransferBuffer(
       ctx->device, &(SDL_GPUTransferBufferCreateInfo){
                        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                       .size  = (Uint32)grown,
+                       .size  = (Uint32)(vertex_bytes + index_bytes),
                    });
-  if (!created) {
-    return false;
-  }
-  SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->transfer_buffer);
-  ctx->transfer_buffer      = created;
-  ctx->transfer_buffer_size = grown;
-  return true;
+  return ctx->vertex_buffer && ctx->index_buffer && ctx->transfer_buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -3093,8 +3179,15 @@ static bool pxl__update_viewport(pxl_context* ctx, int window_w, int window_h) {
   return exact;
 }
 
-pxl_context* pxl_create(const pxl_desc* desc) {
+size_t pxl_memory_size(const pxl_desc* desc) {
   PXL_ASSERT(desc);
+  pxl__layout layout;
+  return pxl__make_layout(desc, &layout) ? layout.size : 0;
+}
+
+pxl_context* pxl_create_in(const pxl_desc* desc, void* memory, size_t size) {
+  PXL_ASSERT(desc);
+  PXL_ASSERT(((uintptr_t)memory & (alignof(max_align_t) - 1)) == 0);
   if (!desc->device) {
     SDL_SetError("pxl: the device is required");
     return nullptr;
@@ -3103,12 +3196,17 @@ pxl_context* pxl_create(const pxl_desc* desc) {
     SDL_SetError("pxl: a context without a window needs a canvas size");
     return nullptr;
   }
-  pxl_context* ctx = PXL_MALLOC(sizeof *ctx);
-  if (!ctx) {
-    SDL_OutOfMemory();
+  pxl__layout layout;
+  if (!pxl__make_layout(desc, &layout)) {
     return nullptr;
   }
-  *ctx = (pxl_context){
+  if (!memory || size < layout.size) {
+    SDL_SetError("pxl: the memory is too small: see pxl_memory_size()");
+    return nullptr;
+  }
+  uint8_t* bytes   = memory;
+  pxl_context* ctx = memory;
+  *ctx             = (pxl_context){
       .device        = desc->device,
       .window        = desc->window,
       .width         = desc->width,
@@ -3116,6 +3214,12 @@ pxl_context* pxl_create(const pxl_desc* desc) {
       .scale_mode    = desc->scale_mode,
       .letterbox     = desc->letterbox,
       .pixel_density = 1.0f,
+      .limits        = layout.limits,
+      .vertices      = (pxl__vertex*)(bytes + layout.vertices),
+      .indices       = (uint32_t*)(bytes + layout.indices),
+      .commands      = (pxl__command*)(bytes + layout.commands),
+      .uniforms      = bytes + layout.uniforms,
+      .pipelines     = (pxl__pipeline*)(bytes + layout.pipelines),
   };
   ctx->letterbox.a = 255;
 
@@ -3143,6 +3247,10 @@ pxl_context* pxl_create(const pxl_desc* desc) {
       return nullptr;
     }
   }
+  if (!pxl__create_geometry_buffers(ctx)) {
+    pxl_destroy(ctx);
+    return nullptr;
+  }
   ctx->white = pxl_create_texture(ctx, &(pxl_texture_desc){
                                            .width  = 1,
                                            .height = 1,
@@ -3162,6 +3270,26 @@ pxl_context* pxl_create(const pxl_desc* desc) {
       .w = (float)ctx->canvas->width,
       .h = (float)ctx->canvas->height,
   };
+  return ctx;
+}
+
+pxl_context* pxl_create(const pxl_desc* desc) {
+  PXL_ASSERT(desc);
+  size_t size = pxl_memory_size(desc);
+  if (size == 0) {
+    return nullptr;
+  }
+  void* memory = PXL_MALLOC(size);
+  if (!memory) {
+    SDL_OutOfMemory();
+    return nullptr;
+  }
+  pxl_context* ctx = pxl_create_in(desc, memory, size);
+  if (!ctx) {
+    PXL_FREE(memory);
+    return nullptr;
+  }
+  ctx->owns_memory = true;
   return ctx;
 }
 
@@ -3197,12 +3325,9 @@ void pxl_destroy(pxl_context* ctx) {
   if (ctx->claimed_window) {
     SDL_ReleaseWindowFromGPUDevice(ctx->device, ctx->window);
   }
-  PXL_FREE(ctx->pipelines);
-  PXL_FREE(ctx->vertices);
-  PXL_FREE(ctx->indices);
-  PXL_FREE(ctx->commands);
-  PXL_FREE(ctx->uniforms);
-  PXL_FREE(ctx);
+  if (ctx->owns_memory) {
+    PXL_FREE(ctx);
+  }
 }
 
 pxl_texture* pxl_get_canvas(const pxl_context* ctx) {
@@ -3361,14 +3486,9 @@ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size) {
   size_t offset =
       (ctx->uniform_size + pxl__uniform_align - 1) & ~(pxl__uniform_align - 1);
   size_t end = 0;
-  if (ckd_add(&end, offset, size) || size > UINT32_MAX) {
-    return pxl__fail(ctx, "uniforms too large");
+  if (ckd_add(&end, offset, size) || end > ctx->limits.uniform_bytes) {
+    return pxl__fail(ctx, "too many uniform bytes: raise max_uniform_bytes");
   }
-  uint8_t* uniforms = pxl__grow(ctx->uniforms, 1, end, &ctx->uniform_capacity);
-  if (!uniforms) {
-    return pxl__fail(ctx, "out of memory");
-  }
-  ctx->uniforms = uniforms;
   memcpy(ctx->uniforms + offset, data, size);
   ctx->uniform_size         = end;
   ctx->state.uniform_offset = offset;
@@ -3437,13 +3557,9 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
       last->bindings[0].sampler == next.bindings[0].sampler) {
     return last;
   }
-  pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
-  if (!commands) {
+  if (ctx->command_count == ctx->limits.commands) {
     return nullptr;
   }
-  ctx->commands                       = commands;
   ctx->commands[ctx->command_count++] = next;
   return &ctx->commands[ctx->command_count - 1];
 }
@@ -3454,29 +3570,27 @@ typedef struct pxl__geometry {
   uint32_t base;
 } pxl__geometry;
 
-/** Reserves vertices and indices at the end of the geometry of the frame. */
-static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
-                         size_t index_count, pxl__geometry out[static 1]) {
+/**
+ * Reserves vertices and indices at the end of the geometry of the frame.
+ *
+ * @param extra_vertices The room after the limit that this reserve may use.
+ * @param extra_indices  The same for indices.
+ */
+static bool pxl__reserve_with_extra(pxl_context* ctx, size_t vertex_count,
+                                    size_t index_count, size_t extra_vertices,
+                                    size_t extra_indices,
+                                    pxl__geometry out[static 1]) {
   size_t vertices = 0;
   size_t indices  = 0;
   if (ckd_add(&vertices, ctx->vertex_count, vertex_count) ||
-      ckd_add(&indices, ctx->index_count, index_count) ||
-      vertices > UINT32_MAX || indices > UINT32_MAX) {
-    return pxl__fail(ctx, "too many vertices");
+      vertices > ctx->limits.vertices + extra_vertices) {
+    return pxl__fail(ctx, "too many vertices: raise max_vertices");
   }
-  pxl__vertex* grown_vertices = pxl__grow(ctx->vertices, sizeof *ctx->vertices,
-                                          vertices, &ctx->vertex_capacity);
-  if (!grown_vertices) {
-    return pxl__fail(ctx, "out of memory");
+  if (ckd_add(&indices, ctx->index_count, index_count) ||
+      indices > ctx->limits.indices + extra_indices) {
+    return pxl__fail(ctx, "too many indices: raise max_indices");
   }
-  ctx->vertices           = grown_vertices;
-  uint32_t* grown_indices = pxl__grow(ctx->indices, sizeof *ctx->indices,
-                                      indices, &ctx->index_capacity);
-  if (!grown_indices) {
-    return pxl__fail(ctx, "out of memory");
-  }
-  ctx->indices = grown_indices;
-  *out         = (pxl__geometry){
+  *out = (pxl__geometry){
       .vertices = ctx->vertices + ctx->vertex_count,
       .indices  = ctx->indices + ctx->index_count,
       .base     = (uint32_t)ctx->vertex_count,
@@ -3484,6 +3598,12 @@ static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
   ctx->vertex_count = vertices;
   ctx->index_count  = indices;
   return true;
+}
+
+/** Reserves vertices and indices for a draw of the user. */
+static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
+                         size_t index_count, pxl__geometry out[static 1]) {
+  return pxl__reserve_with_extra(ctx, vertex_count, index_count, 0, 0, out);
 }
 
 /**
@@ -3509,7 +3629,7 @@ static bool pxl__append(pxl_context* ctx, const pxl_texture* texture,
   }
   pxl__command* command = pxl__draw_command(ctx, texture);
   if (!command) {
-    return pxl__fail(ctx, "out of memory");
+    return pxl__fail(ctx, "too many commands: raise max_commands");
   }
   if (!pxl__reserve(ctx, vertex_count, index_count, out)) {
     return false;
@@ -3609,14 +3729,10 @@ static pxl_vec2 pxl__vertex_position(const pxl_context* ctx, float x, float y) {
 
 void pxl_clear(pxl_context* ctx, pxl_color color) {
   PXL_ASSERT(ctx && ctx->in_frame);
-  pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
-  if (!commands) {
-    pxl__fail(ctx, "out of memory");
+  if (ctx->command_count == ctx->limits.commands) {
+    pxl__fail(ctx, "too many commands: raise max_commands");
     return;
   }
-  ctx->commands                       = commands;
   ctx->commands[ctx->command_count++] = (pxl__command){
       .kind        = PXL__COMMAND_CLEAR,
       .target      = pxl__target(ctx),
@@ -4480,21 +4596,8 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
   if (ctx->vertex_count == 0) {
     return true;
   }
-  size_t vertex_bytes = 0;
-  size_t index_bytes  = 0;
-  size_t total        = 0;
-  if (ckd_mul(&vertex_bytes, ctx->vertex_count, sizeof *ctx->vertices) ||
-      ckd_mul(&index_bytes, ctx->index_count, sizeof *ctx->indices) ||
-      ckd_add(&total, vertex_bytes, index_bytes) || total > UINT32_MAX) {
-    return pxl__fail(ctx, "too many vertices");
-  }
-  if (!pxl__reserve_buffer(ctx, &ctx->vertex_buffer, &ctx->vertex_buffer_size,
-                           vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX) ||
-      !pxl__reserve_buffer(ctx, &ctx->index_buffer, &ctx->index_buffer_size,
-                           index_bytes, SDL_GPU_BUFFERUSAGE_INDEX) ||
-      !pxl__reserve_transfer(ctx, total)) {
-    return pxl__fail(ctx, SDL_GetError());
-  }
+  size_t vertex_bytes = ctx->vertex_count * sizeof *ctx->vertices;
+  size_t index_bytes  = ctx->index_count * sizeof *ctx->indices;
   uint8_t* mapped =
       SDL_MapGPUTransferBuffer(ctx->device, ctx->transfer_buffer, true);
   if (!mapped) {
@@ -4536,7 +4639,8 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
  */
 static int64_t pxl__append_canvas_quad(pxl_context* ctx, bool sharp) {
   pxl__geometry g = {};
-  if (!pxl__reserve(ctx, 4, 6, &g)) {
+  if (!pxl__reserve_with_extra(ctx, pxl__canvas_vertices, pxl__canvas_indices,
+                               pxl__canvas_vertices, pxl__canvas_indices, &g)) {
     return -1;
   }
   const pxl_rect* r = &ctx->viewport;
@@ -4605,9 +4709,11 @@ static void pxl__record_frame(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
     sharp       = !pxl__update_viewport(ctx, w, h);
     canvas_quad = pxl__append_canvas_quad(ctx, sharp);
   }
-  ctx->stats.vertices = ctx->vertex_count;
-  ctx->stats.indices  = ctx->index_count;
-  bool uploaded       = pxl__upload_geometry(ctx, cmd);
+  ctx->stats.vertices      = ctx->vertex_count;
+  ctx->stats.indices       = ctx->index_count;
+  ctx->stats.commands      = ctx->command_count;
+  ctx->stats.uniform_bytes = ctx->uniform_size;
+  bool uploaded            = pxl__upload_geometry(ctx, cmd);
   if (uploaded) {
     pxl__render_commands(ctx, cmd);
   }

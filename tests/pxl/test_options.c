@@ -20,16 +20,6 @@ static void* counting_malloc(size_t size) {
   return pointer;
 }
 
-// Counts allocations. It fails the call that the test selects.
-static void* counting_realloc(void* pointer, size_t size) {
-  if (++calls == failing_call) {
-    return nullptr;
-  }
-  void* grown = realloc(pointer, size);
-  blocks += grown && !pointer;
-  return grown;
-}
-
 // Counts releases.
 static void counting_free(void* pointer) {
   blocks -= pointer != nullptr;
@@ -45,7 +35,6 @@ static void counting_assert(bool condition) {
 }
 
 #define PXL_MALLOC(size) counting_malloc(size)
-#define PXL_REALLOC(pointer, size) counting_realloc(pointer, size)
 #define PXL_FREE(pointer) counting_free(pointer)
 #define PXL_ASSERT(condition) counting_assert(condition)
 #define PXL_IMPLEMENTATION
