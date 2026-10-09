@@ -3,6 +3,8 @@
 # - invalid-enum-default-initialization: AGENTS.md asks for `= {}`.
 # - multi-level-implicit-pointer-conversion: void * converts implicitly.
 # - DeprecatedOrUnsafeBufferHandling: asks for optional Annex K functions.
+# - casting-through-void: asks for reinterpret_cast. clang-tidy 21 checks C
+#   too.
 Checks: >
   -*,
   bugprone-*,
@@ -30,6 +32,7 @@ Checks: >
   -clang-analyzer-core.uninitialized.Assign,
   -bugprone-invalid-enum-default-initialization,
   -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-casting-through-void,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 
 WarningsAsErrors: "*"
