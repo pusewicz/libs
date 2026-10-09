@@ -26,7 +26,10 @@ development. Each library is one header file.
 
 ## Commands
 
-Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
+Rake drives the build. `rake -T` lists the tasks. Do not use CMake. Rake
+first prints a banner: the host, the compiler, the flags, the packages, the
+test environment and the tools, with their paths and versions. Read it
+first when a build fails. A library adds rows with `BANNER_ROWS`.
 
 - `rake check` - the definition of done: format check, clang-tidy, tests
   and examples. Run it before you finish a change.

@@ -7,9 +7,14 @@
 #               clang does not have. Default: Homebrew LLVM clang, or clang.
 #   PKG_CONFIG  The pkg-config program. Default: pkg-config.
 #   SANITIZE=0  Build the tests and the examples without sanitizers.
+#   CLANG_TIDY, CLANG_FORMAT
+#               The clang-tidy and clang-format programs. Default: Homebrew
+#               LLVM, or PATH.
 #
-# Tasks run in parallel. "rake -j N" runs at most N tasks at a time.
+# Tasks run in parallel. "rake -j N" runs at most N tasks at a time. Rake
+# first prints the options and the tools it uses.
 
+require "etc"
 require "monitor"
 require "open3"
 require "rake/clean"
@@ -39,6 +44,10 @@ TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
 # loaded until exit. Else LeakSanitizer reports their memory as leaks, with no
 # symbols.
 TEST_ENVIRONMENT = { "VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING" => "1" }.freeze
+
+# The rows that tools/*/*.rake add to the banner: label => a block that
+# returns the value.
+BANNER_ROWS = {}
 
 # run captures the output of the tools, so they do not see the terminal. These
 # flags keep their colors.
@@ -72,7 +81,8 @@ def run(*command, env: {})
 end
 
 # Finds a tool. An environment variable wins, then Homebrew LLVM, then PATH.
-def tool(variable, *names)
+# Returns nil if there is no tool.
+def find_tool(variable, *names)
   return ENV[variable] if ENV[variable]
 
   names.each do |name|
@@ -80,7 +90,12 @@ def tool(variable, *names)
     return llvm if File.executable?(llvm)
     return name if which(name)
   end
-  abort "#{variable}: none of #{names.join(', ')} found"
+  nil
+end
+
+# Finds a tool like find_tool. Stops the build if there is no tool.
+def tool(variable, *names)
+  find_tool(variable, *names) || abort("#{variable}: none of #{names.join(', ')} found")
 end
 
 # Returns the absolute path of a program: `name` if it has a directory, else
@@ -254,3 +269,100 @@ multitask check: ["format:check", :tidy, :test, :examples]
 task default: :check
 
 Dir["tools/*/*.rake"].each { |file| load file }
+
+# Returns the path, the flags and the version of a command, for example
+# "/usr/bin/cc: Apple clang version 21.0.0", or "not found". If the command
+# has no --version, it gives the target of the path, which often has the
+# version in it.
+def describe(command)
+  return "not found" unless command
+
+  program, *flags = command.shellsplit
+  path = which(program)
+  return "#{program}: not found" unless path
+
+  output, status = Open3.capture2e(path, *flags, "--version")
+  version = output.lines.map(&:strip).find { _1.match?(/\d/) } if status.success?
+  target = File.realpath(path)
+  version ||= "-> #{target}" unless target == path
+  [[path, *flags].join(" "), version].compact.join(": ")
+rescue SystemCallError => e
+  "#{command}: #{e.message}"
+end
+
+# Returns the operating system, the kernel and the CPU, for example
+# "macOS 26.0, Darwin 25.0.0, arm64 (arm64-darwin25)".
+def host
+  uname = Etc.uname
+  # On Windows, uname gives the version for programs without a manifest.
+  kernel = "#{uname[:sysname]} #{uname[:release]}" unless Gem.win_platform?
+  "#{[operating_system, kernel, uname[:machine]].compact.join(', ')} (#{RUBY_PLATFORM})"
+end
+
+# Returns the name and the version of the operating system, or nil.
+def operating_system
+  if RUBY_PLATFORM.include?("darwin")
+    version, = Open3.capture2("sw_vers", "-productVersion")
+    "macOS #{version.strip}"
+  elsif Gem.win_platform?
+    version, = Open3.capture2("cmd", "/c", "ver")
+    "Windows #{version[/\d+(\.\d+)+/]}"
+  elsif File.exist?("/etc/os-release")
+    File.read("/etc/os-release")[/^PRETTY_NAME="?([^"\n]*)/, 1]
+  end
+rescue SystemCallError
+  nil
+end
+
+# Returns the version and the prefix of a pkg-config package, or "not found".
+def describe_package(pkg_config, package)
+  return "not found" unless which(pkg_config)
+
+  version, status = Open3.capture2e(pkg_config, "--modversion", package)
+  return "not found" unless status.success?
+
+  prefix, = Open3.capture2e(pkg_config, "--variable=prefix", package)
+  "#{version.strip} in #{prefix.strip}"
+end
+
+# Returns the environment variables that change the tests: the ones that the
+# Rakefile sets, and the ones of pxl, SDL, Vulkan and the sanitizers.
+def test_environment
+  ENV.to_h.select { |name, _| name.match?(/\A(PXL|SDL|VK|ASAN|UBSAN|LSAN)_/) }.merge(TEST_ENVIRONMENT).sort.to_h
+end
+
+# Returns how many tasks Rake runs at a time: its thread pool and the main
+# thread.
+def jobs
+  threads = Rake.application.options.thread_pool_size || (Rake.suggested_thread_count - 1)
+  threads.to_f.infinite? ? "no limit" : (threads + 1).to_s
+end
+
+# Prints the options and the tools of the build, so that each log shows them.
+# It gets the values in parallel, because each tool takes time to start.
+def print_banner
+  pkg_config = ENV.fetch("PKG_CONFIG", "pkg-config")
+  packages = PACKAGES.values.flatten.uniq.to_h { |package| [package, -> { describe_package(pkg_config, package) }] }
+  rows = {
+    "rake" => -> { "#{Rake.application.top_level_tasks.join(' ')} (rake #{Rake::VERSION}, ruby #{RUBY_VERSION})" },
+    "Host" => -> { host },
+    "Jobs" => -> { jobs },
+    "Build" => -> { File.expand_path(BUILD) },
+    "CC" => -> { describe(compiler) },
+    "Flags" => -> { ["@compile_flags.txt", *build_flags].join(" ") },
+    "PKG_CONFIG" => -> { describe(pkg_config) },
+    **packages,
+    "Test env" => -> { test_environment.map { |name, value| "#{name}=#{value}" }.join(" ") },
+    "CLANG_TIDY" => -> { describe(find_tool("CLANG_TIDY", "clang-tidy")) },
+    "CLANG_FORMAT" => -> { describe(find_tool("CLANG_FORMAT", "clang-format")) },
+    "CLANG" => -> { describe(find_tool("CLANG", "clang")) },
+    **BANNER_ROWS,
+  }
+  values = rows.transform_values { |row| Thread.new(&row) }.transform_values(&:value)
+  width = values.keys.map(&:length).max
+  values.each { |label, value| puts "#{label.ljust(width)}  #{value}" }
+  puts
+  $stdout.flush
+end
+
+print_banner unless Rake.application.options.show_tasks || Rake.application.options.show_prereqs
