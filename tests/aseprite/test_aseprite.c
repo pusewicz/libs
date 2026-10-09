@@ -7,6 +7,7 @@
 // A second include must not define the implementation again.
 #include "aseprite.h" // NOLINT(readability-duplicate-include)
 #include "consumer.h"
+#include "walk.h"
 
 #define PICO_UNIT_IMPLEMENTATION
 #include <stdio.h>
@@ -706,6 +707,225 @@ TEST_CASE(test_result_strings) {
   return true;
 }
 
+/* ---- Memory ------------------------------------------------------------ */
+
+static constexpr size_t max_live_blocks = 32;
+static constexpr size_t canary_size     = 64;
+static constexpr unsigned char canary   = 0xA5;
+
+// An allocator that records its blocks and can fail one allocation.
+typedef struct tracking_allocator {
+  size_t allocations;
+  size_t fail_at; // The allocation to fail, counted from 1. 0: none.
+  size_t live_count;
+  struct {
+    void* pointer;
+    size_t size;
+  } live[max_live_blocks];
+  bool misuse; // A bad alignment, a bad release or a wrong size.
+} tracking_allocator;
+
+static void* tracking_alloc(void* user, size_t size, size_t alignment) {
+  tracking_allocator* tracker = user;
+  tracker->allocations++;
+  if (tracker->allocations == tracker->fail_at) {
+    return nullptr;
+  }
+  void* pointer = malloc(size);
+  if (!pointer || tracker->live_count == max_live_blocks || alignment == 0 ||
+      alignment > alignof(max_align_t) || (alignment & (alignment - 1)) != 0 ||
+      (uintptr_t)pointer % alignment != 0) {
+    tracker->misuse = true;
+    free(pointer);
+    return nullptr;
+  }
+  tracker->live[tracker->live_count].pointer = pointer;
+  tracker->live[tracker->live_count].size    = size;
+  tracker->live_count++;
+  return pointer;
+}
+
+static void tracking_release(void* user, void* pointer, size_t size) {
+  tracking_allocator* tracker = user;
+  for (size_t i = 0; i < tracker->live_count; i++) {
+    if (tracker->live[i].pointer == pointer) {
+      tracker->misuse  = tracker->misuse || tracker->live[i].size != size;
+      tracker->live[i] = tracker->live[--tracker->live_count];
+      free(pointer);
+      return;
+    }
+  }
+  tracker->misuse = true;
+}
+
+// Makes options that use a tracking allocator.
+static aseprite_options tracked(tracking_allocator* tracker) {
+  return (aseprite_options){
+      .allocator =
+          {
+              .alloc   = tracking_alloc,
+              .release = tracking_release,
+              .user    = tracker,
+          },
+  };
+}
+
+// Loads a fixture from memory, or from the disk.
+static aseprite_result load_fixture(const char* name, bool from_file,
+                                    const aseprite_options* options,
+                                    aseprite_sprite* sprite) {
+  if (from_file) {
+    char path[1024];
+    fixture_path(path, sizeof path, name, ".aseprite");
+    return aseprite_load_file(path, options, sprite);
+  }
+  size_t size   = 0;
+  uint8_t* data = read_file(name, ".aseprite", &size);
+  if (!data) {
+    *sprite = (aseprite_sprite){};
+    return ASEPRITE_ERROR_IO;
+  }
+  aseprite_result result = aseprite_load_memory(data, size, options, sprite);
+  free(data);
+  return result;
+}
+
+static const char* const memory_fixtures[] = {
+    "rgba", "indexed", "grayscale", "tilemap", "properties",
+    "tags", "slices",  "uuid",      "skipped",
+};
+
+// Loads a fixture with each allocation failing in turn. A failed load must
+// leave nothing allocated, and the sprite must release with its allocator.
+static bool check_allocator_failures(const char* name, bool from_file) {
+  tracking_allocator tracker = {};
+  aseprite_options options   = tracked(&tracker);
+  aseprite_sprite sprite;
+  bool ok = load_fixture(name, from_file, &options, &sprite) == ASEPRITE_OK;
+  size_t needed = tracker.allocations;
+  ok            = ok && tracker.live_count > 0;
+  aseprite_free(&sprite);
+  ok = ok && needed > 0 && tracker.live_count == 0 && !tracker.misuse;
+
+  for (size_t i = 1; ok && i <= needed; i++) {
+    tracker = (tracking_allocator){.fail_at = i};
+    ok      = load_fixture(name, from_file, &options, &sprite) ==
+                  ASEPRITE_ERROR_NO_MEMORY &&
+              sprite.memory == nullptr && sprite.frames == nullptr &&
+              tracker.live_count == 0 && !tracker.misuse;
+  }
+  if (!ok) {
+    fprintf(stderr, "allocator test failed for %s (file: %d)\n", name,
+            from_file);
+  }
+  return ok;
+}
+
+TEST_CASE(test_allocator_failures) {
+  for (size_t i = 0; i < sizeof memory_fixtures / sizeof memory_fixtures[0];
+       i++) {
+    REQUIRE(check_allocator_failures(memory_fixtures[i], false));
+    REQUIRE(check_allocator_failures(memory_fixtures[i], true));
+  }
+  return true;
+}
+
+// Checks that the bytes after the usable part of a block are unchanged.
+static bool canary_intact(const unsigned char* block, size_t size,
+                          size_t total) {
+  for (size_t i = size; i < total; i++) {
+    if (block[i] != canary) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Loads a fixture into blocks of different sizes. memory_used is the least
+// size that works, and a load never writes outside of its block.
+static bool check_caller_block(const char* name, bool from_file) {
+  aseprite_sprite reference;
+  if (load_fixture(name, from_file, nullptr, &reference) != ASEPRITE_OK) {
+    return false;
+  }
+  size_t used       = reference.memory_used;
+  uint64_t checksum = walk_sprite(&reference);
+  aseprite_free(&reference);
+  bool ok = used > 0 && used % alignof(max_align_t) == 0;
+
+  const size_t sizes[] = {
+      used, used + 3, used - 1, used - alignof(max_align_t), 0,
+  };
+  for (size_t i = 0; ok && i < sizeof sizes / sizeof sizes[0]; i++) {
+    size_t size          = sizes[i];
+    size_t total         = (size + canary_size + alignof(max_align_t) - 1) &
+                           ~(alignof(max_align_t) - 1);
+    unsigned char* block = aligned_alloc(alignof(max_align_t), total);
+    if (!block) {
+      return false;
+    }
+    memset(block, 0, size);
+    memset(block + size, canary, total - size);
+
+    aseprite_options options = {.memory = block, .memory_size = size};
+    aseprite_sprite sprite;
+    aseprite_result result = load_fixture(name, from_file, &options, &sprite);
+    if (size >= used) {
+      const unsigned char* frames = (const unsigned char*)sprite.frames;
+      ok = result == ASEPRITE_OK && sprite.memory == nullptr &&
+           sprite.memory_used == used && frames >= block &&
+           frames < block + size && walk_sprite(&sprite) == checksum;
+      aseprite_free(&sprite);
+      aseprite_free(&sprite);
+      if (ok) {
+        // The block is free again after aseprite_free().
+        ok = load_fixture(name, from_file, &options, &sprite) == ASEPRITE_OK &&
+             walk_sprite(&sprite) == checksum;
+        aseprite_free(&sprite);
+      }
+    } else {
+      ok = result == ASEPRITE_ERROR_NO_MEMORY && sprite.frames == nullptr &&
+           sprite.memory_used == 0;
+    }
+    ok = ok && canary_intact(block, size, total);
+    free(block);
+  }
+  if (!ok) {
+    fprintf(stderr, "caller block test failed for %s (file: %d)\n", name,
+            from_file);
+  }
+  return ok;
+}
+
+TEST_CASE(test_caller_block) {
+  for (size_t i = 0; i < sizeof memory_fixtures / sizeof memory_fixtures[0];
+       i++) {
+    REQUIRE(check_caller_block(memory_fixtures[i], false));
+    REQUIRE(check_caller_block(memory_fixtures[i], true));
+  }
+  return true;
+}
+
+TEST_CASE(test_memory_used_does_not_depend_on_the_allocator) {
+  for (size_t i = 0; i < sizeof memory_fixtures / sizeof memory_fixtures[0];
+       i++) {
+    for (int from_file = 0; from_file <= 1; from_file++) {
+      tracking_allocator tracker = {};
+      aseprite_options options   = tracked(&tracker);
+      aseprite_sprite plain;
+      aseprite_sprite custom;
+      REQUIRE(load_fixture(memory_fixtures[i], from_file, nullptr, &plain) ==
+              ASEPRITE_OK);
+      REQUIRE(load_fixture(memory_fixtures[i], from_file, &options, &custom) ==
+              ASEPRITE_OK);
+      REQUIRE(plain.memory_used == custom.memory_used);
+      aseprite_free(&plain);
+      aseprite_free(&custom);
+    }
+  }
+  return true;
+}
+
 /* ---- Inflate ----------------------------------------------------------- */
 
 // Checks the inflate function with a pair of fixture files.
@@ -798,6 +1018,9 @@ static TEST_SUITE(suite_aseprite) {
   RUN_TEST_CASE(test_every_prefix_fails);
   RUN_TEST_CASE(test_header_without_implementation);
   RUN_TEST_CASE(test_free_is_safe);
+  RUN_TEST_CASE(test_allocator_failures);
+  RUN_TEST_CASE(test_caller_block);
+  RUN_TEST_CASE(test_memory_used_does_not_depend_on_the_allocator);
   RUN_TEST_CASE(test_result_strings);
   RUN_TEST_CASE(test_inflate);
   RUN_TEST_CASE(test_inflate_bad_headers);

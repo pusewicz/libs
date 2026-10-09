@@ -1,21 +1,18 @@
-// Tests the aseprite.h options: a custom allocator, a custom assert and no
-// stdio. It also makes each allocation fail in turn. Usage: test_options DIR
+// Tests the aseprite.h options: ASEPRITE_MALLOC and ASEPRITE_FREE for the
+// default allocator, a custom assert and no stdio. The allocator struct and
+// the caller block are in test_aseprite.c. Usage: test_options DIR
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static size_t allocations        = 0;
-static size_t releases           = 0;
-static size_t failing_allocation = 0;
-static size_t asserts            = 0;
+static size_t allocations = 0;
+static size_t releases    = 0;
+static size_t asserts     = 0;
 
-// Counts allocations. It fails the allocation that the test selects.
+// Counts allocations.
 static void* counting_malloc(size_t size) {
   allocations++;
-  if (allocations == failing_allocation) {
-    return nullptr;
-  }
   return malloc(size);
 }
 
@@ -64,45 +61,48 @@ static uint8_t* read_fixture(const char* name, size_t* size) {
   return data;
 }
 
-// Loads a fixture with each allocation failing in turn. No load may leak.
-static bool check_allocation_failures(const char* name) {
+TEST_CASE(test_macros_back_the_default_allocator) {
   size_t size   = 0;
-  uint8_t* data = read_fixture(name, &size);
+  uint8_t* data = read_fixture("rgba", &size);
   if (!data) {
     return false;
   }
-  allocations        = 0;
-  releases           = 0;
-  failing_allocation = 0;
+  allocations = 0;
+  releases    = 0;
   aseprite_sprite sprite;
-  bool ok = aseprite_load_memory(data, size, nullptr, &sprite) == ASEPRITE_OK;
-  size_t needed = allocations;
+  bool ok = aseprite_load_memory(data, size, nullptr, &sprite) == ASEPRITE_OK &&
+            allocations > 0 && releases == 0;
   aseprite_free(&sprite);
-  ok = ok && needed > 0 && releases == allocations;
-
-  for (size_t i = 1; ok && i <= needed; i++) {
-    allocations        = 0;
-    releases           = 0;
-    failing_allocation = i;
-    ok = aseprite_load_memory(data, size, nullptr, &sprite) ==
-             ASEPRITE_ERROR_NO_MEMORY &&
-         sprite.memory == nullptr && releases == allocations - 1;
-  }
-  failing_allocation = 0;
+  ok = ok && releases == allocations;
   free(data);
-  if (!ok) {
-    fprintf(stderr, "allocation failure test failed for %s\n", name);
-  }
-  return ok;
+  REQUIRE(ok);
+  return true;
 }
 
-TEST_CASE(test_allocation_failures) {
-  static const char* const names[] = {
-      "rgba", "indexed", "tilemap", "properties", "tags", "slices",
-  };
-  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
-    REQUIRE(check_allocation_failures(names[i]));
+TEST_CASE(test_caller_block_does_not_allocate) {
+  size_t size   = 0;
+  uint8_t* data = read_fixture("rgba", &size);
+  if (!data) {
+    return false;
   }
+  aseprite_sprite sprite;
+  bool ok = aseprite_load_memory(data, size, nullptr, &sprite) == ASEPRITE_OK;
+  size_t used = sprite.memory_used;
+  aseprite_free(&sprite);
+
+  void* block = aligned_alloc(alignof(max_align_t), used);
+  ok          = ok && block != nullptr;
+  if (ok) {
+    allocations              = 0;
+    releases                 = 0;
+    aseprite_options options = {.memory = block, .memory_size = used};
+    ok = aseprite_load_memory(data, size, &options, &sprite) == ASEPRITE_OK;
+    aseprite_free(&sprite);
+    ok = ok && allocations == 0 && releases == 0;
+  }
+  free(block);
+  free(data);
+  REQUIRE(ok);
   return true;
 }
 
@@ -116,7 +116,8 @@ TEST_CASE(test_custom_assert) {
 
 // Runs all the tests.
 static TEST_SUITE(suite_options) {
-  RUN_TEST_CASE(test_allocation_failures);
+  RUN_TEST_CASE(test_macros_back_the_default_allocator);
+  RUN_TEST_CASE(test_caller_block_does_not_allocate);
   RUN_TEST_CASE(test_custom_assert);
 }
 
