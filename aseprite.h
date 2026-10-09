@@ -1,13 +1,14 @@
 /*
  * aseprite.h - read Aseprite files (.ase, .aseprite).
  *
- * Version: 0.1.0
+ * Version: 0.2.0
  * SPDX-License-Identifier: Zlib
  * Copyright (c) 2026 Piotr Usewicz
  *
  * This library reads all the chunks of an Aseprite file into an
  * aseprite_sprite. It decompresses the cel and tileset images. The pixels
- * keep the color depth of the sprite. The library does not blend layers.
+ * keep the color depth of the sprite. aseprite_render_frame() blends the
+ * layers of a frame into RGBA pixels, with the same result as Aseprite.
  *
  * Usage:
  *
@@ -19,8 +20,15 @@
  *   if (result != ASEPRITE_OK) {
  *     fprintf(stderr, "%s\n", aseprite_result_string(result));
  *   }
+ *
+ *   // All the visible layers of frame 0, as RGBA pixels.
+ *   aseprite_color* pixels =
+ *       malloc(sizeof *pixels * sprite.width * sprite.height);
+ *   result = aseprite_render_frame(&sprite, 0, nullptr, pixels);
  *   ...
  *   aseprite_free(&sprite);
+ *
+ * Link with libm (-lm) on Linux.
  *
  * Options. Define them before you include this file:
  *
@@ -552,13 +560,46 @@ bool aseprite_tile_diagonal_flip(const aseprite_tilemap* tilemap,
  */
 double aseprite_fixed_to_double(aseprite_fixed value);
 
+/**
+ * Tells if a layer shows: the layer and all its parent groups are visible.
+ *
+ * @param sprite The sprite.
+ * @param layer  The layer index.
+ * @return true when the layer shows.
+ */
+bool aseprite_layer_visible(const aseprite_sprite* sprite, uint32_t layer);
+
+/**
+ * Renders a frame like Aseprite does. It blends the cels of the image and
+ * tilemap layers in their order and z-index, with their opacity and blend
+ * mode. It does not draw reference layers. When the sprite has
+ * ASEPRITE_SPRITE_FLAG_GROUP_BLEND, it blends each group separately first,
+ * then blends the group with its opacity and blend mode.
+ *
+ * @param sprite The sprite.
+ * @param frame  The frame index.
+ * @param layers nullptr to draw the layers that show. Else layer_count flags:
+ *               the function draws the image and tilemap layers that have
+ *               true, also when they are hidden. It does not read the flags
+ *               of groups.
+ * @param pixels Receives width * height colors with straight alpha, row by
+ *               row from top to bottom.
+ * @return ASEPRITE_OK, ASEPRITE_ERROR_NO_MEMORY, or ASEPRITE_ERROR_MALFORMED
+ *         when groups nest too deep.
+ */
+[[__nodiscard__]] aseprite_result
+aseprite_render_frame(const aseprite_sprite* sprite, uint32_t frame,
+                      const bool* layers, aseprite_color* pixels);
+
 #endif
 
 #ifdef ASEPRITE_IMPLEMENTATION
 #ifndef ASEPRITE_IMPLEMENTATION_INCLUDED
 #define ASEPRITE_IMPLEMENTATION_INCLUDED
 
+#include <math.h>
 #include <stdckdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(ASEPRITE_MALLOC) != defined(ASEPRITE_FREE)
@@ -566,7 +607,6 @@ double aseprite_fixed_to_double(aseprite_fixed value);
 #endif
 
 #ifndef ASEPRITE_MALLOC
-#include <stdlib.h>
 #define ASEPRITE_MALLOC(size) malloc(size)
 #define ASEPRITE_FREE(pointer) free(pointer)
 #endif
@@ -605,6 +645,7 @@ constexpr size_t aseprite_frame_header_size    = 16;
 constexpr size_t aseprite_chunk_header_size    = 6;
 constexpr uint32_t aseprite_max_palette_size   = 65536;
 constexpr uint32_t aseprite_max_property_depth = 128;
+constexpr uint32_t aseprite_max_group_depth    = 64;
 // Deflate gives at most 1032 bytes for each input byte.
 constexpr size_t aseprite_max_inflate_ratio = 1032;
 constexpr size_t aseprite_block_size        = (size_t)64 * 1024;
@@ -2610,6 +2651,685 @@ static aseprite_result aseprite_read_frames(aseprite_parser* parser,
   return ASEPRITE_OK;
 }
 
+/* ---- Blend modes ------------------------------------------------------- */
+
+// The blend functions give the same pixels as Aseprite with its "new blend
+// method". They follow src/doc/blend_funcs.cpp of Aseprite, which has this
+// license:
+//
+//   Copyright (c) 2018-present Igara Studio S.A.
+//   Copyright (c) 2001-2018 David Capello
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a
+//   copy of this software and associated documentation files (the
+//   "Software"), to deal in the Software without restriction, including
+//   without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to
+//   permit persons to whom the Software is furnished to do so, subject to
+//   the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included
+//   in all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+//   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+//   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+//   CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+//   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+//   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// Divides by 256 and rounds down, also for negative values.
+static int32_t aseprite_div256(int32_t value) {
+  return value >= 0 ? value / 256 : -((255 - value) / 256);
+}
+
+// Multiplies two values as fractions of 255, with rounding. The first value
+// can be negative.
+static int32_t aseprite_mul8(int32_t a, int32_t b) {
+  int32_t t = (a * b) + 128;
+  return aseprite_div256(aseprite_div256(t) + t);
+}
+
+// Divides a by b as fractions of 255, with rounding. 0 <= a < b.
+static int32_t aseprite_div8(int32_t a, int32_t b) {
+  return ((a * 255) + (b / 2)) / b;
+}
+
+// Limits a value to a channel.
+static uint8_t aseprite_channel(int32_t value) {
+  if (value < 0) {
+    return 0;
+  }
+  return value > 255 ? 255 : (uint8_t)value;
+}
+
+// Blends src over backdrop.
+static aseprite_color aseprite_blend_normal(aseprite_color backdrop,
+                                            aseprite_color src,
+                                            int32_t opacity) {
+  if (backdrop.a == 0) {
+    src.a = (uint8_t)aseprite_mul8(src.a, opacity);
+    return src;
+  }
+  if (src.a == 0) {
+    return backdrop;
+  }
+  int32_t sa = aseprite_mul8(src.a, opacity);
+  int32_t ra = sa + backdrop.a - aseprite_mul8(backdrop.a, sa);
+  return (aseprite_color){
+      .r = (uint8_t)(backdrop.r + ((src.r - backdrop.r) * sa / ra)),
+      .g = (uint8_t)(backdrop.g + ((src.g - backdrop.g) * sa / ra)),
+      .b = (uint8_t)(backdrop.b + ((src.b - backdrop.b) * sa / ra)),
+      .a = (uint8_t)ra,
+  };
+}
+
+// Moves backdrop towards src by an amount.
+static aseprite_color aseprite_blend_merge(aseprite_color backdrop,
+                                           aseprite_color src, int32_t amount) {
+  aseprite_color result = backdrop;
+  if (backdrop.a == 0) {
+    result = src;
+  } else if (src.a != 0) {
+    result.r =
+        (uint8_t)(backdrop.r + aseprite_mul8(src.r - backdrop.r, amount));
+    result.g =
+        (uint8_t)(backdrop.g + aseprite_mul8(src.g - backdrop.g, amount));
+    result.b =
+        (uint8_t)(backdrop.b + aseprite_mul8(src.b - backdrop.b, amount));
+  }
+  result.a = (uint8_t)(backdrop.a + aseprite_mul8(src.a - backdrop.a, amount));
+  if (result.a == 0) {
+    result = (aseprite_color){};
+  }
+  return result;
+}
+
+static int32_t aseprite_screen(int32_t b, int32_t s) {
+  return b + s - aseprite_mul8(b, s);
+}
+
+static int32_t aseprite_hard_light(int32_t b, int32_t s) {
+  return s < 128 ? aseprite_mul8(b, s * 2) : aseprite_screen(b, (s * 2) - 255);
+}
+
+static int32_t aseprite_color_dodge(int32_t b, int32_t s) {
+  if (b == 0) {
+    return 0;
+  }
+  s = 255 - s;
+  return b >= s ? 255 : aseprite_div8(b, s);
+}
+
+static int32_t aseprite_color_burn(int32_t b, int32_t s) {
+  if (b == 255) {
+    return 255;
+  }
+  b = 255 - b;
+  return b >= s ? 0 : 255 - aseprite_div8(b, s);
+}
+
+// fma(a, b, c) is a * b + c, see aseprite_lum().
+static int32_t aseprite_soft_light(int32_t b_value, int32_t s_value) {
+  double b = (double)b_value / 255.0;
+  double s = (double)s_value / 255.0;
+  double d = b <= 0.25 ? fma(fma(16, b, -12), b, 4) * b : sqrt(b);
+  double r = s <= 0.5 ? fma(-(fma(-2.0, s, 1.0) * b), 1.0 - b, b)
+                      : fma(fma(2.0, s, -1.0), d - b, b);
+  return (int32_t)fma(r, 255, 0.5);
+}
+
+static int32_t aseprite_divide(int32_t b, int32_t s) {
+  if (b == 0) {
+    return 0;
+  }
+  return b >= s ? 255 : aseprite_div8(b, s);
+}
+
+// Blends one channel with a separable blend mode.
+static int32_t aseprite_blend_channel(aseprite_blend_mode mode, int32_t b,
+                                      int32_t s) {
+  switch (mode) {
+  case ASEPRITE_BLEND_MULTIPLY:
+    return aseprite_mul8(b, s);
+  case ASEPRITE_BLEND_SCREEN:
+    return aseprite_screen(b, s);
+  case ASEPRITE_BLEND_OVERLAY:
+    return aseprite_hard_light(s, b);
+  case ASEPRITE_BLEND_DARKEN:
+    return b < s ? b : s;
+  case ASEPRITE_BLEND_LIGHTEN:
+    return b > s ? b : s;
+  case ASEPRITE_BLEND_COLOR_DODGE:
+    return aseprite_color_dodge(b, s);
+  case ASEPRITE_BLEND_COLOR_BURN:
+    return aseprite_color_burn(b, s);
+  case ASEPRITE_BLEND_HARD_LIGHT:
+    return aseprite_hard_light(b, s);
+  case ASEPRITE_BLEND_SOFT_LIGHT:
+    return aseprite_soft_light(b, s);
+  case ASEPRITE_BLEND_DIFFERENCE:
+    return b > s ? b - s : s - b;
+  case ASEPRITE_BLEND_EXCLUSION:
+    return b + s - (2 * aseprite_mul8(b, s));
+  case ASEPRITE_BLEND_ADDITION:
+    return b + s;
+  case ASEPRITE_BLEND_SUBTRACT:
+    return b - s;
+  case ASEPRITE_BLEND_DIVIDE:
+    return aseprite_divide(b, s);
+  default:
+    return s;
+  }
+}
+
+// A color with channels from 0 to 1, for the non-separable blend modes.
+typedef struct aseprite_rgb {
+  double r;
+  double g;
+  double b;
+} aseprite_rgb;
+
+static aseprite_rgb aseprite_to_rgb(aseprite_color color) {
+  return (aseprite_rgb){
+      .r = (double)color.r / 255.0,
+      .g = (double)color.g / 255.0,
+      .b = (double)color.b / 255.0,
+  };
+}
+
+static double aseprite_min3(aseprite_rgb c) {
+  double gb = c.g < c.b ? c.g : c.b;
+  return c.r < gb ? c.r : gb;
+}
+
+static double aseprite_max3(aseprite_rgb c) {
+  double gb = c.g > c.b ? c.g : c.b;
+  return c.r > gb ? c.r : gb;
+}
+
+// Aseprite on Apple silicon fuses a * b + c into one operation with one
+// rounding (clang -ffp-contract=on). fma() does the same here, so the result
+// does not change with the compiler. Without it, a pixel can be 1 off.
+static double aseprite_lum(aseprite_rgb c) {
+  return fma(0.11, c.b, fma(0.3, c.r, 0.59 * c.g));
+}
+
+static double aseprite_sat(aseprite_rgb c) {
+  return aseprite_max3(c) - aseprite_min3(c);
+}
+
+static aseprite_rgb aseprite_clip_color(aseprite_rgb c) {
+  double l = aseprite_lum(c);
+  double n = aseprite_min3(c);
+  double x = aseprite_max3(c);
+  if (n < 0) {
+    c.r = l + (((c.r - l) * l) / (l - n));
+    c.g = l + (((c.g - l) * l) / (l - n));
+    c.b = l + (((c.b - l) * l) / (l - n));
+  }
+  if (x > 1) {
+    c.r = l + (((c.r - l) * (1 - l)) / (x - l));
+    c.g = l + (((c.g - l) * (1 - l)) / (x - l));
+    c.b = l + (((c.b - l) * (1 - l)) / (x - l));
+  }
+  return c;
+}
+
+static aseprite_rgb aseprite_set_lum(aseprite_rgb c, double l) {
+  double d = l - aseprite_lum(c);
+  c.r += d;
+  c.g += d;
+  c.b += d;
+  return aseprite_clip_color(c);
+}
+
+static aseprite_rgb aseprite_set_sat(aseprite_rgb c, double s) {
+  double low   = aseprite_min3(c);
+  double range = aseprite_max3(c) - low;
+  if (range <= 0.0) {
+    return (aseprite_rgb){};
+  }
+  return (aseprite_rgb){
+      .r = ((c.r - low) * s) / range,
+      .g = ((c.g - low) * s) / range,
+      .b = ((c.b - low) * s) / range,
+  };
+}
+
+// Converts a channel from 0 to 1 back to 0 to 255. It rounds down.
+static uint8_t aseprite_from_unit(double value) {
+  return aseprite_channel((int32_t)(255.0 * value));
+}
+
+// Mixes the colors of backdrop and src with a blend mode. The result has the
+// alpha of src.
+static aseprite_color aseprite_blend_colors(aseprite_blend_mode mode,
+                                            aseprite_color backdrop,
+                                            aseprite_color src) {
+  aseprite_rgb b = aseprite_to_rgb(backdrop);
+  aseprite_rgb s = aseprite_to_rgb(src);
+  aseprite_rgb mixed;
+  switch (mode) {
+  case ASEPRITE_BLEND_HUE:
+    mixed =
+        aseprite_set_lum(aseprite_set_sat(s, aseprite_sat(b)), aseprite_lum(b));
+    break;
+  case ASEPRITE_BLEND_SATURATION:
+    mixed =
+        aseprite_set_lum(aseprite_set_sat(b, aseprite_sat(s)), aseprite_lum(b));
+    break;
+  case ASEPRITE_BLEND_COLOR:
+    mixed = aseprite_set_lum(s, aseprite_lum(b));
+    break;
+  case ASEPRITE_BLEND_LUMINOSITY:
+    mixed = aseprite_set_lum(b, aseprite_lum(s));
+    break;
+  default:
+    return (aseprite_color){
+        .r = aseprite_channel(aseprite_blend_channel(mode, backdrop.r, src.r)),
+        .g = aseprite_channel(aseprite_blend_channel(mode, backdrop.g, src.g)),
+        .b = aseprite_channel(aseprite_blend_channel(mode, backdrop.b, src.b)),
+        .a = src.a,
+    };
+  }
+  return (aseprite_color){
+      .r = aseprite_from_unit(mixed.r),
+      .g = aseprite_from_unit(mixed.g),
+      .b = aseprite_from_unit(mixed.b),
+      .a = src.a,
+  };
+}
+
+// Blends src over backdrop with a blend mode and an opacity. Unknown modes
+// blend like the normal mode.
+static aseprite_color aseprite_blend(aseprite_blend_mode mode,
+                                     aseprite_color backdrop,
+                                     aseprite_color src, int32_t opacity) {
+  aseprite_color normal = aseprite_blend_normal(backdrop, src, opacity);
+  if (mode == ASEPRITE_BLEND_NORMAL || mode > ASEPRITE_BLEND_DIVIDE ||
+      backdrop.a == 0) {
+    return normal;
+  }
+  aseprite_color mixed = aseprite_blend_normal(
+      backdrop, aseprite_blend_colors(mode, backdrop, src), opacity);
+  aseprite_color merged = aseprite_blend_merge(normal, mixed, backdrop.a);
+  int32_t amount = aseprite_mul8(backdrop.a, aseprite_mul8(src.a, opacity));
+  return aseprite_blend_merge(merged, mixed, amount);
+}
+
+/* ---- Render ------------------------------------------------------------ */
+
+// A layer to draw and its place in the drawing order.
+typedef struct aseprite_plan_item {
+  uint32_t layer;
+  int32_t order; // The position of the layer plus the z-index of its cel.
+  int16_t z_index;
+} aseprite_plan_item;
+
+// The layers of a render pass.
+typedef enum aseprite_pass : uint8_t {
+  ASEPRITE_PASS_ALL,
+  ASEPRITE_PASS_BACKGROUND,
+  ASEPRITE_PASS_OTHERS,
+} aseprite_pass;
+
+// The state of a frame render.
+typedef struct aseprite_renderer {
+  const aseprite_sprite* sprite;
+  const aseprite_palette* palette;
+  const bool* layers;
+  const aseprite_cel** cels; // The cel of each layer in the frame.
+  aseprite_plan_item* items; // Space for layer_count items.
+  uint32_t bytes_per_pixel;
+  bool compose_groups;
+} aseprite_renderer;
+
+// Tells if a color is 0 in all channels: the transparent color of RGBA
+// images.
+static bool aseprite_is_clear(aseprite_color color) {
+  return color.r == 0 && color.g == 0 && color.b == 0 && color.a == 0;
+}
+
+// Reads a pixel of an image. Returns false for the transparent color:
+// Aseprite does not draw it.
+static bool aseprite_read_color(const aseprite_renderer* r,
+                                const uint8_t* pixel, aseprite_color* color) {
+  switch (r->sprite->depth) {
+  case ASEPRITE_DEPTH_RGBA:
+    *color = (aseprite_color){pixel[0], pixel[1], pixel[2], pixel[3]};
+    return !aseprite_is_clear(*color);
+  case ASEPRITE_DEPTH_GRAYSCALE:
+    *color = (aseprite_color){pixel[0], pixel[0], pixel[0], pixel[1]};
+    return pixel[0] != 0 || pixel[1] != 0;
+  case ASEPRITE_DEPTH_INDEXED:
+    if (pixel[0] == r->sprite->transparent_index) {
+      return false;
+    }
+    *color = pixel[0] < r->palette->count ? r->palette->colors[pixel[0]]
+                                          : (aseprite_color){};
+    return true;
+  }
+  return false;
+}
+
+// Draws an image with its top-left corner at (x, y).
+static void aseprite_draw_image(const aseprite_renderer* r,
+                                aseprite_color* target,
+                                const aseprite_image* image, int64_t x,
+                                int64_t y, int32_t opacity,
+                                aseprite_blend_mode mode) {
+  int64_t width  = r->sprite->width;
+  int64_t height = r->sprite->height;
+  int64_t left   = x > 0 ? x : 0;
+  int64_t top    = y > 0 ? y : 0;
+  int64_t right  = x + image->width < width ? x + image->width : width;
+  int64_t bottom = y + image->height < height ? y + image->height : height;
+  for (int64_t row = top; row < bottom; row++) {
+    const uint8_t* src =
+        image->pixels +
+        ((((size_t)(row - y) * image->width) + (size_t)(left - x)) *
+         r->bytes_per_pixel);
+    aseprite_color* dst = target + ((size_t)row * (size_t)width) + left;
+    for (int64_t column = left; column < right; column++) {
+      aseprite_color color;
+      if (aseprite_read_color(r, src, &color)) {
+        *dst = aseprite_blend(mode, *dst, color, opacity);
+      }
+      src += r->bytes_per_pixel;
+      dst++;
+    }
+  }
+}
+
+// Finds the tiles of a row or column that touch the canvas.
+static void aseprite_tile_range(int64_t origin, int64_t tile_size,
+                                uint32_t count, int64_t canvas_size,
+                                uint32_t* begin, uint32_t* end) {
+  int64_t first = origin >= 0 ? 0 : -origin / tile_size;
+  int64_t last  = 0;
+  if (canvas_size > origin) {
+    last = (canvas_size - origin + tile_size - 1) / tile_size;
+  }
+  if (last > count) {
+    last = count;
+  }
+  if (first > last) {
+    first = last;
+  }
+  *begin = (uint32_t)first;
+  *end   = (uint32_t)last;
+}
+
+// Draws one tile with its top-left corner at (x, y).
+static void aseprite_draw_tile(const aseprite_renderer* r,
+                               aseprite_color* target,
+                               const aseprite_tileset* tileset,
+                               const aseprite_tilemap* tilemap, uint32_t tile,
+                               int64_t x, int64_t y, int32_t opacity,
+                               aseprite_blend_mode mode) {
+  int64_t tile_width  = tileset->tile_width;
+  int64_t tile_height = tileset->tile_height;
+  bool flip_x         = aseprite_tile_x_flip(tilemap, tile);
+  bool flip_y         = aseprite_tile_y_flip(tilemap, tile);
+  bool flip_diagonal  = aseprite_tile_diagonal_flip(tilemap, tile);
+  // A diagonal flip of a tile that is not square uses the square part only.
+  int64_t limit_x = tile_width;
+  int64_t limit_y = tile_height;
+  if (flip_diagonal) {
+    limit_x = tile_width < tile_height ? tile_width : tile_height;
+    limit_y = limit_x;
+  }
+  const uint8_t* pixels =
+      tileset->image.pixels +
+      ((size_t)aseprite_tile_id(tilemap, tile) * (size_t)tile_width *
+       (size_t)tile_height * r->bytes_per_pixel);
+  int64_t width  = r->sprite->width;
+  int64_t height = r->sprite->height;
+  int64_t left   = x > 0 ? x : 0;
+  int64_t top    = y > 0 ? y : 0;
+  int64_t right  = x + tile_width < width ? x + tile_width : width;
+  int64_t bottom = y + tile_height < height ? y + tile_height : height;
+  for (int64_t row = top; row < bottom; row++) {
+    for (int64_t column = left; column < right; column++) {
+      int64_t source_x = flip_x ? tile_width - 1 - (column - x) : column - x;
+      int64_t source_y = flip_y ? tile_height - 1 - (row - y) : row - y;
+      if (flip_diagonal) {
+        int64_t swap = source_x;
+        source_x     = source_y;
+        source_y     = swap;
+      }
+      if (source_x >= limit_x || source_y >= limit_y) {
+        continue;
+      }
+      const uint8_t* src =
+          pixels +
+          ((((size_t)source_y * (size_t)tile_width) + (size_t)source_x) *
+           r->bytes_per_pixel);
+      aseprite_color color;
+      if (aseprite_read_color(r, src, &color)) {
+        aseprite_color* dst = target + ((size_t)row * (size_t)width) + column;
+        *dst                = aseprite_blend(mode, *dst, color, opacity);
+      }
+    }
+  }
+}
+
+// Draws the tiles of a tilemap cel.
+static void aseprite_draw_tilemap(const aseprite_renderer* r,
+                                  aseprite_color* target,
+                                  const aseprite_cel* cel,
+                                  const aseprite_tileset* tileset,
+                                  int32_t opacity, aseprite_blend_mode mode) {
+  const aseprite_tilemap* tilemap = &cel->tilemap;
+  int64_t tile_width              = tileset->tile_width;
+  int64_t tile_height             = tileset->tile_height;
+  if (!tileset->image.pixels || tile_width == 0 || tile_height == 0) {
+    return;
+  }
+  uint32_t first_column = 0;
+  uint32_t last_column  = 0;
+  uint32_t first_row    = 0;
+  uint32_t last_row     = 0;
+  aseprite_tile_range(cel->x, tile_width, tilemap->width, r->sprite->width,
+                      &first_column, &last_column);
+  aseprite_tile_range(cel->y, tile_height, tilemap->height, r->sprite->height,
+                      &first_row, &last_row);
+  for (uint32_t row = first_row; row < last_row; row++) {
+    for (uint32_t column = first_column; column < last_column; column++) {
+      uint32_t tile = tilemap->tiles[((size_t)row * tilemap->width) + column];
+      // Aseprite does not draw the tile value 0, nor tiles that the
+      // tileset does not have.
+      if (tile == 0 || aseprite_tile_id(tilemap, tile) >= tileset->tile_count) {
+        continue;
+      }
+      aseprite_draw_tile(r, target, tileset, tilemap, tile,
+                         cel->x + ((int64_t)column * tile_width),
+                         cel->y + ((int64_t)row * tile_height), opacity, mode);
+    }
+  }
+}
+
+// Draws the cel of a layer, if the frame has one.
+static void aseprite_draw_cel(const aseprite_renderer* r, uint32_t index,
+                              aseprite_color* target) {
+  const aseprite_cel* cel = r->cels[index];
+  if (!cel) {
+    return;
+  }
+  const aseprite_layer* layer = &r->sprite->layers[index];
+  int32_t opacity             = aseprite_mul8(cel->opacity, layer->opacity);
+  if (cel->image.pixels) {
+    aseprite_draw_image(r, target, &cel->image, cel->x, cel->y, opacity,
+                        layer->blend_mode);
+  } else if (cel->tilemap.tiles && layer->type == ASEPRITE_LAYER_TYPE_TILEMAP &&
+             layer->tileset < r->sprite->tileset_count) {
+    aseprite_draw_tilemap(r, target, cel, &r->sprite->tilesets[layer->tileset],
+                          opacity, layer->blend_mode);
+  }
+}
+
+// Tells if a render draws an image or tilemap layer.
+static bool aseprite_draws_layer(const aseprite_renderer* r, uint32_t index) {
+  const aseprite_layer* layer = &r->sprite->layers[index];
+  if (layer->type != ASEPRITE_LAYER_TYPE_IMAGE &&
+      layer->type != ASEPRITE_LAYER_TYPE_TILEMAP) {
+    return false;
+  }
+  if ((layer->flags & ASEPRITE_LAYER_FLAG_REFERENCE) != 0) {
+    return false;
+  }
+  return r->layers ? r->layers[index]
+                   : aseprite_layer_visible(r->sprite, index);
+}
+
+// Tells if a render draws a group. Only composed groups are drawn as one.
+static bool aseprite_draws_group(const aseprite_renderer* r, uint32_t index) {
+  return r->compose_groups &&
+         (r->layers || aseprite_layer_visible(r->sprite, index));
+}
+
+// Orders plan items by order, then by z-index.
+static int aseprite_compare_items(const void* a, const void* b) {
+  const aseprite_plan_item* x = a;
+  const aseprite_plan_item* y = b;
+  if (x->order != y->order) {
+    return x->order < y->order ? -1 : 1;
+  }
+  if (x->z_index != y->z_index) {
+    return x->z_index < y->z_index ? -1 : 1;
+  }
+  return 0;
+}
+
+// Lists the layers to draw in a group, in the drawing order. The group -1 is
+// the root. Without group composition, the root lists the layers of all
+// groups. The layers of a group follow the group in the file, so the scan
+// stops at the first layer outside it.
+static size_t aseprite_plan(const aseprite_renderer* r, int32_t group,
+                            aseprite_plan_item* items) {
+  const aseprite_sprite* sprite = r->sprite;
+  size_t count                  = 0;
+  int32_t position              = 0;
+  bool sort                     = false;
+  for (uint32_t i = (uint32_t)(group + 1);
+       i < sprite->layer_count && sprite->layers[i].parent >= group; i++) {
+    const aseprite_layer* layer = &sprite->layers[i];
+    if (r->compose_groups && layer->parent != group) {
+      continue;
+    }
+    position  = r->compose_groups ? position + 1 : (int32_t)i;
+    bool draw = layer->type == ASEPRITE_LAYER_TYPE_GROUP
+                    ? aseprite_draws_group(r, i)
+                    : aseprite_draws_layer(r, i);
+    if (!draw) {
+      continue;
+    }
+    int16_t z_index = r->cels[i] ? r->cels[i]->z_index : 0;
+    items[count++]  = (aseprite_plan_item){
+        .layer   = i,
+        .order   = position + z_index,
+        .z_index = z_index,
+    };
+    sort = sort || z_index != 0;
+  }
+  if (sort) {
+    qsort(items, count, sizeof *items, aseprite_compare_items);
+  }
+  return count;
+}
+
+static aseprite_result aseprite_render_group(aseprite_renderer* r,
+                                             uint32_t group, size_t used,
+                                             uint32_t depth,
+                                             aseprite_color* target);
+
+// Draws the layers of a group in their order. used is the count of plan
+// items that the parent groups use.
+static aseprite_result aseprite_render_layers(aseprite_renderer* r,
+                                              int32_t group, size_t used,
+                                              uint32_t depth,
+                                              aseprite_pass pass,
+                                              aseprite_color* target) {
+  aseprite_plan_item* items = r->items + used;
+  size_t count              = aseprite_plan(r, group, items);
+  for (size_t i = 0; i < count; i++) {
+    uint32_t index              = items[i].layer;
+    const aseprite_layer* layer = &r->sprite->layers[index];
+    bool is_group               = layer->type == ASEPRITE_LAYER_TYPE_GROUP;
+    bool background =
+        !is_group && (layer->flags & ASEPRITE_LAYER_FLAG_BACKGROUND) != 0;
+    if ((pass == ASEPRITE_PASS_BACKGROUND && !background) ||
+        (pass == ASEPRITE_PASS_OTHERS && background)) {
+      continue;
+    }
+    if (is_group) {
+      aseprite_result result =
+          aseprite_render_group(r, index, used + count, depth + 1, target);
+      if (result != ASEPRITE_OK) {
+        return result;
+      }
+    } else {
+      aseprite_draw_cel(r, index, target);
+    }
+  }
+  return ASEPRITE_OK;
+}
+
+// Draws the layers of a group into an empty image, then blends the image
+// with the opacity and blend mode of the group.
+static aseprite_result aseprite_render_group(aseprite_renderer* r,
+                                             uint32_t group, size_t used,
+                                             uint32_t depth,
+                                             aseprite_color* target) {
+  if (depth > aseprite_max_group_depth) {
+    return ASEPRITE_ERROR_MALFORMED;
+  }
+  size_t count = (size_t)r->sprite->width * r->sprite->height;
+  size_t size  = 0;
+  if (ckd_mul(&size, count, sizeof(aseprite_color))) {
+    return ASEPRITE_ERROR_NO_MEMORY;
+  }
+  aseprite_color* image = ASEPRITE_MALLOC(size > 0 ? size : 1);
+  if (!image) {
+    return ASEPRITE_ERROR_NO_MEMORY;
+  }
+  memset(image, 0, size);
+  aseprite_result result = aseprite_render_layers(
+      r, (int32_t)group, used, depth, ASEPRITE_PASS_ALL, image);
+  if (result == ASEPRITE_OK) {
+    const aseprite_layer* layer = &r->sprite->layers[group];
+    for (size_t i = 0; i < count; i++) {
+      aseprite_color color = image[i];
+      if (!aseprite_is_clear(color)) {
+        target[i] =
+            aseprite_blend(layer->blend_mode, target[i], color, layer->opacity);
+      }
+    }
+  }
+  ASEPRITE_FREE(image);
+  return result;
+}
+
+// Gets the color under all layers. An indexed sprite shows the color of the
+// transparent index under its background layer.
+static aseprite_color aseprite_backdrop(const aseprite_renderer* r) {
+  const aseprite_sprite* sprite = r->sprite;
+  if (sprite->depth != ASEPRITE_DEPTH_INDEXED) {
+    return (aseprite_color){};
+  }
+  for (uint32_t i = 0; i < sprite->layer_count; i++) {
+    if ((sprite->layers[i].flags & ASEPRITE_LAYER_FLAG_BACKGROUND) != 0 &&
+        aseprite_draws_layer(r, i)) {
+      return sprite->transparent_index < r->palette->count
+                 ? r->palette->colors[sprite->transparent_index]
+                 : (aseprite_color){};
+    }
+  }
+  return (aseprite_color){};
+}
+
 /* ---- Public functions -------------------------------------------------- */
 
 aseprite_result aseprite_load_memory(const void* data, size_t size,
@@ -2769,6 +3489,79 @@ bool aseprite_tile_diagonal_flip(const aseprite_tilemap* tilemap,
 
 double aseprite_fixed_to_double(aseprite_fixed value) {
   return (double)value / 65536.0;
+}
+
+bool aseprite_layer_visible(const aseprite_sprite* sprite, uint32_t layer) {
+  ASEPRITE_ASSERT(sprite);
+  ASEPRITE_ASSERT(layer < sprite->layer_count);
+  // A parent comes before its children, so the loop ends.
+  for (int64_t i = layer; i >= 0; i = sprite->layers[i].parent) {
+    if ((sprite->layers[i].flags & ASEPRITE_LAYER_FLAG_VISIBLE) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+aseprite_result aseprite_render_frame(const aseprite_sprite* sprite,
+                                      uint32_t frame, const bool* layers,
+                                      aseprite_color* pixels) {
+  ASEPRITE_ASSERT(sprite);
+  ASEPRITE_ASSERT(frame < sprite->frame_count);
+  ASEPRITE_ASSERT(pixels);
+  static const aseprite_palette no_palette = {};
+  const aseprite_frame* source             = &sprite->frames[frame];
+  aseprite_renderer r                      = {
+      .sprite          = sprite,
+      .palette         = source->palette < sprite->palette_count
+                             ? &sprite->palettes[source->palette]
+                             : &no_palette,
+      .layers          = layers,
+      .bytes_per_pixel = aseprite_bytes_per_pixel(sprite->depth),
+      .compose_groups = (sprite->flags & ASEPRITE_SPRITE_FLAG_GROUP_BLEND) != 0,
+  };
+  size_t count            = (size_t)sprite->width * sprite->height;
+  aseprite_color backdrop = aseprite_backdrop(&r);
+  for (size_t i = 0; i < count; i++) {
+    pixels[i] = backdrop;
+  }
+  if (sprite->layer_count == 0) {
+    return ASEPRITE_OK;
+  }
+
+  // One block holds the cel of each layer and the plan items.
+  size_t cels_size  = 0;
+  size_t items_size = 0;
+  size_t size       = 0;
+  if (ckd_mul(&cels_size, (size_t)sprite->layer_count, sizeof *r.cels) ||
+      ckd_mul(&items_size, (size_t)sprite->layer_count, sizeof *r.items) ||
+      ckd_add(&size, cels_size, items_size)) {
+    return ASEPRITE_ERROR_NO_MEMORY;
+  }
+  void* memory = ASEPRITE_MALLOC(size);
+  if (!memory) {
+    return ASEPRITE_ERROR_NO_MEMORY;
+  }
+  r.cels  = memory;
+  r.items = (aseprite_plan_item*)(void*)((unsigned char*)memory + cels_size);
+  for (uint32_t i = 0; i < sprite->layer_count; i++) {
+    r.cels[i] = nullptr;
+  }
+  for (uint32_t i = 0; i < source->cel_count; i++) {
+    const aseprite_cel* cel = &source->cels[i];
+    if (!r.cels[cel->layer]) {
+      r.cels[cel->layer] = cel;
+    }
+  }
+
+  // Aseprite draws the background layer first, then the other layers.
+  aseprite_result result =
+      aseprite_render_layers(&r, -1, 0, 0, ASEPRITE_PASS_BACKGROUND, pixels);
+  if (result == ASEPRITE_OK) {
+    result = aseprite_render_layers(&r, -1, 0, 0, ASEPRITE_PASS_OTHERS, pixels);
+  }
+  ASEPRITE_FREE(memory);
+  return result;
 }
 
 #endif
