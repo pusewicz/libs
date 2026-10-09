@@ -52,7 +52,7 @@ SDL_AppResult SDL_AppInit(void** state, [[maybe_unused]] int argc,
       .max_text          = 128,
   };
   if (pxl_memory_size(&desc) > sizeof pxl_memory) {
-    SDL_Log("pxl needs %zu bytes", pxl_memory_size(&desc));
+    SDL_Log("pxl needs %u bytes", (unsigned)pxl_memory_size(&desc));
     return SDL_APP_FAILURE;
   }
   a->pxl = pxl_create_in(&desc, pxl_memory, sizeof pxl_memory);
