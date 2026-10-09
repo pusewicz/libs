@@ -69,6 +69,21 @@ import Testing
     #expect(pixel(-0.0005) == 0)
   }
 
+  @Test func growableBuffer() {
+    var buffer = GrowableBuffer<UInt32>(capacity: 2)
+    for chunk in 0..<10 {
+      let values = buffer.append(chunk + 1)
+      for i in 0...chunk {
+        (values + i).initialize(to: UInt32(buffer.count - chunk - 1 + i))
+      }
+    }
+    #expect(buffer.count == 55)
+    let values = buffer.withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
+    #expect(values == (0..<55).map(UInt32.init))
+    buffer.removeAll()
+    #expect(buffer.count == 0)
+  }
+
   /// The vertex attributes and the pixel uploads depend on these layouts.
   @Test func layouts() {
     #expect(MemoryLayout<BatchVertex>.stride == 28)

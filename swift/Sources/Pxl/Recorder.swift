@@ -6,7 +6,11 @@ import CSDL3
 /// struct. In them, Swift checks exclusive access at compile time. On the
 /// stored properties of a class, it checks at each access at run time, and it
 /// copies values that it cannot prove stay unchanged.
-struct Recorder {
+///
+/// A non-mutating method gets a copy of the whole struct, hundreds of bytes.
+/// So the helpers of the draws are methods of the small values that they use:
+/// `Quad`, `Transform`, `Circle` and `Font`.
+struct Recorder: ~Copyable {
   /// The texture of plain color and of empty shader slots.
   let white: Texture
   let samplers: Samplers
@@ -26,10 +30,14 @@ struct Recorder {
     state.target ?? canvas
   }
 
-  /// The size of the current target. It reads the target without a retain.
+  /// The size of the current target. Unlike `??`, `if let` reads the target
+  /// without a retain.
   var targetSize: (width: Int, height: Int) {
-    let target = state.target ?? canvas
-    return (target.width, target.height)
+    if let target = state.target {
+      (target.width, target.height)
+    } else {
+      (canvas.width, canvas.height)
+    }
   }
 
   /// Starts a frame with a new draw state.
@@ -86,7 +94,7 @@ extension Recorder {
 extension Recorder {
   mutating func clear(_ color: Color) {
     assert(inFrame, "draw during a frame")
-    batch.commands.append(Command(kind: .clear(color), target: currentTarget))
+    batch.start(Command(kind: .clear(color), target: currentTarget))
   }
 
   mutating func drawSprite(
@@ -103,11 +111,11 @@ extension Recorder {
       tx: position.x - c * sx * origin.x + s * sy * origin.y,
       ty: position.y - s * sx * origin.x - c * sy * origin.y)
     let t = state.transform * local
-    let corners = snapped([
-      t * Vec2(0, 0), t * Vec2(src.width, 0), t * Vec2(src.width, src.height),
-      t * Vec2(0, src.height),
-    ])
-    addQuad(texture, corners, uv: texture.uv(of: src), color: color, overlay: overlay)
+    let quad = Quad(
+      topLeft: t * Vec2(0, 0), topRight: t * Vec2(src.width, 0),
+      bottomRight: t * Vec2(src.width, src.height), bottomLeft: t * Vec2(0, src.height)
+    ).snapped(if: state.snap)
+    addQuad(texture, quad, uv: texture.uv(of: src), color: color, overlay: overlay)
   }
 
   mutating func drawNineSlice(
@@ -124,14 +132,17 @@ extension Recorder {
       rect.y, rect.y + top, rect.y + rect.height - bottom, rect.y + rect.height,
     ]
     let size = Vec2(Float(texture.width), Float(texture.height))
+    let t = state.transform
+    let snap = state.snap
     for j in 0..<3 {
       for i in 0..<3 where dx[i + 1] > dx[i] && dy[j + 1] > dy[j] {
-        let corners: [4 of Vec2] = [
-          vertexPosition(dx[i], dy[j]), vertexPosition(dx[i + 1], dy[j]),
-          vertexPosition(dx[i + 1], dy[j + 1]), vertexPosition(dx[i], dy[j + 1]),
-        ]
+        let quad = Quad(
+          topLeft: t.vertex(dx[i], dy[j], snapped: snap),
+          topRight: t.vertex(dx[i + 1], dy[j], snapped: snap),
+          bottomRight: t.vertex(dx[i + 1], dy[j + 1], snapped: snap),
+          bottomLeft: t.vertex(dx[i], dy[j + 1], snapped: snap))
         let uv = (Vec2(sx[i], sy[j]) / size, Vec2(sx[i + 1], sy[j + 1]) / size)
-        addQuad(texture, corners, uv: uv, color: color, overlay: .transparent)
+        addQuad(texture, quad, uv: uv, color: color, overlay: .transparent)
       }
     }
   }
@@ -150,11 +161,13 @@ extension Recorder {
   mutating func drawRect(_ rect: Rect, color: Color) {
     let x1 = rect.x + rect.width
     let y1 = rect.y + rect.height
-    let corners: [4 of Vec2] = [
-      vertexPosition(rect.x, rect.y), vertexPosition(x1, rect.y), vertexPosition(x1, y1),
-      vertexPosition(rect.x, y1),
-    ]
-    addQuad(nil, corners, uv: (.zero, .one), color: color, overlay: .transparent)
+    let t = state.transform
+    let snap = state.snap
+    let quad = Quad(
+      topLeft: t.vertex(rect.x, rect.y, snapped: snap),
+      topRight: t.vertex(x1, rect.y, snapped: snap),
+      bottomRight: t.vertex(x1, y1, snapped: snap), bottomLeft: t.vertex(rect.x, y1, snapped: snap))
+    addPlainQuad(quad, color: color)
   }
 
   mutating func drawRectLines(_ rect: Rect, color: Color) {
@@ -193,12 +206,16 @@ extension Recorder {
   }
 
   mutating func drawCircle(at center: Vec2, radius: Float, color: Color) {
-    guard let circle = circleInTarget(center, radius) else { return }
+    guard
+      let circle = Circle(
+        center: center, radius: radius, transform: state.transform,
+        targetHeight: targetSize.height)
+    else { return }
     // Rows with the same span become one quad.
     var top = circle.rows.lowerBound
     var half = circleSpan(radius: circle.radius, dy: top)
-    for dy in circle.rows.lowerBound + 1...circle.rows.upperBound + 1 {
-      let next = dy <= circle.rows.upperBound ? circleSpan(radius: circle.radius, dy: dy) : -1
+    for dy in circle.rows.lowerBound + 1..<circle.rows.upperBound + 1 {
+      let next = dy < circle.rows.upperBound ? circleSpan(radius: circle.radius, dy: dy) : -1
       if next != half {
         fill(
           x: circle.x - half, y: circle.y + top, width: 2 * half + 1, height: dy - top,
@@ -210,7 +227,11 @@ extension Recorder {
   }
 
   mutating func drawCircleLines(at center: Vec2, radius: Float, color: Color) {
-    guard let circle = circleInTarget(center, radius) else { return }
+    guard
+      let circle = Circle(
+        center: center, radius: radius, transform: state.transform,
+        targetHeight: targetSize.height)
+    else { return }
     // A pixel is on the edge if one of its four neighbors is outside.
     for dy in circle.rows {
       let half = circleSpan(radius: circle.radius, dy: dy)
@@ -229,24 +250,36 @@ extension Recorder {
   }
 
   mutating func drawTriangle(_ a: Vec2, _ b: Vec2, _ c: Vec2, color: Color) {
-    guard let params = beginDraw(nil, vertexCount: 3, indexCount: 3) else { return }
-    for p in [a, b, c] {
-      batch.addVertex(
-        BatchVertex(
-          vertexPosition(p.x, p.y), .zero, color: color, overlay: .transparent, params: params))
-    }
+    guard beginPlainDraw(vertexCount: 3, indexCount: 3) else { return }
+    let params = VertexParams.plain
+    let t = state.transform
+    let pa = t.vertex(a.x, a.y, snapped: state.snap)
+    let pb = t.vertex(b.x, b.y, snapped: state.snap)
+    let pc = t.vertex(c.x, c.y, snapped: state.snap)
+    batch.addVertex(BatchVertex(pa, .zero, color: color, overlay: .transparent, params: params))
+    batch.addVertex(BatchVertex(pb, .zero, color: color, overlay: .transparent, params: params))
+    batch.addVertex(BatchVertex(pc, .zero, color: color, overlay: .transparent, params: params))
   }
 
   mutating func drawTriangles(_ vertices: [Vertex], texture: Texture?) {
     assert(vertices.count % 3 == 0, "the vertex count must be a multiple of 3")
     let count = vertices.count - vertices.count % 3
-    guard count > 0, let params = beginDraw(texture, vertexCount: count, indexCount: count) else {
-      return
+    guard count > 0 else { return }
+    let params: VertexParams
+    if let texture {
+      guard let textured = beginDraw(texture, vertexCount: count, indexCount: count) else { return }
+      params = textured
+    } else {
+      guard beginPlainDraw(vertexCount: count, indexCount: count) else { return }
+      params = .plain
     }
+    let t = state.transform
+    let snap = state.snap
     for vertex in vertices[..<count] {
       batch.addVertex(
         BatchVertex(
-          vertexPosition(vertex.position.x, vertex.position.y), vertex.uv, color: vertex.color,
+          t.vertex(vertex.position.x, vertex.position.y, snapped: snap), vertex.uv,
+          color: vertex.color,
           overlay: .transparent, params: params))
     }
   }
@@ -267,23 +300,6 @@ extension Recorder {
     }
   }
 
-  func measureText(_ text: String) -> Vec2 {
-    let font = state.font ?? defaultFont
-    var width: Float = 0
-    var line: Float = 0
-    var lines = text.isEmpty ? 0 : 1
-    for scalar in text.unicodeScalars {
-      if scalar == "\n" {
-        line = 0
-        lines += 1
-      } else if let glyph = font.glyph(for: scalar) {
-        line += font.advance(glyph)
-        width = Float.maximum(width, line)
-      }
-    }
-    return Vec2(width, Float(lines) * Float(font.lineHeight))
-  }
-
   /// Draws an area of a texture with its top-left corner at `point`.
   private mutating func drawRegion(
     _ texture: Texture, _ area: Rect, at point: Vec2, color: Color
@@ -291,56 +307,93 @@ extension Recorder {
     let t = state.transform
     let x1 = point.x + area.width
     let y1 = point.y + area.height
-    let corners = snapped([
-      t * point, t * Vec2(x1, point.y), t * Vec2(x1, y1), t * Vec2(point.x, y1),
-    ])
-    addQuad(texture, corners, uv: texture.uv(of: area), color: color, overlay: .transparent)
+    let quad = Quad(
+      topLeft: t * point, topRight: t * Vec2(x1, point.y), bottomRight: t * Vec2(x1, y1),
+      bottomLeft: t * Vec2(point.x, y1)
+    ).snapped(if: state.snap)
+    addQuad(texture, quad, uv: texture.uv(of: area), color: color, overlay: .transparent)
   }
 }
 
 // MARK: - Batching
 
 extension Recorder {
-  /// Checks a draw, and adds its indices to the command of the current state.
+  /// Checks a draw of a texture, and adds its indices to the command of the
+  /// current state.
   ///
   /// - Parameters:
-  ///   - texture: The texture, or nil for plain color.
+  ///   - texture: The texture.
   ///   - vertexCount: The number of vertices that the draw adds.
   ///   - indexCount: The number of indices that the draw adds.
   /// - Returns: The params of the vertices, or nil if the draw cannot happen.
-  mutating func beginDraw(_ texture: Texture?, vertexCount: Int, indexCount: Int)
-    -> SIMD4<UInt8>?
+  mutating func beginDraw(_ texture: Texture, vertexCount: Int, indexCount: Int)
+    -> VertexParams?
   {
-    assert(inFrame, "draw during a frame")
-    guard inFrame else {
-      fail(PxlError("draw outside of a frame"))
-      return nil
-    }
+    guard isRecording() else { return nil }
     let key = drawKey
-    let drawsIntoItself = texture.map { ObjectIdentifier($0) == key.target } ?? false
+    let drawsIntoItself = ObjectIdentifier(texture) == key.target
     assert(!drawsIntoItself, "a texture cannot be drawn into itself")
     guard !drawsIntoItself else {
       fail(PxlError("a texture cannot be drawn into itself"))
       return nil
     }
+    guard hasRoom(vertexCount: vertexCount, indexCount: indexCount) else { return nil }
+    let sampling = texture.sampling
+    addToCommand(
+      key, texture: texture, sampler: samplers[sampling], indexCount: UInt32(indexCount))
+    return VertexParams(sampling)
+  }
+
+  /// Checks a draw of plain color, and adds its indices to the command of the
+  /// current state. Shapes make one for each run of pixels, so it is inlined.
+  ///
+  /// - Returns: false if the draw cannot happen.
+  @inline(always)
+  mutating func beginPlainDraw(vertexCount: Int, indexCount: Int) -> Bool {
+    guard isRecording(), hasRoom(vertexCount: vertexCount, indexCount: indexCount) else {
+      return false
+    }
+    addToCommand(drawKey, texture: nil, sampler: nil, indexCount: UInt32(indexCount))
+    return true
+  }
+
+  /// Returns true during a frame. Else it marks the frame as failed.
+  @inline(always)
+  private mutating func isRecording() -> Bool {
+    assert(inFrame, "draw during a frame")
+    guard inFrame else {
+      fail(PxlError("draw outside of a frame"))
+      return false
+    }
+    return true
+  }
+
+  /// Returns true if a draw can add vertices and indices: the clip area is not
+  /// empty, and the indices fit in 32 bits.
+  @inline(always)
+  private mutating func hasRoom(vertexCount: Int, indexCount: Int) -> Bool {
     if let clip = state.clip, clip.width <= 0 || clip.height <= 0 {
-      return nil
+      return false
     }
     guard batch.hasRoom(vertexCount: vertexCount, indexCount: indexCount) else {
       fail(PxlError("too many vertices"))
-      return nil
+      return false
     }
-    let sampling = texture?.sampling
-    addToCommand(key, texture: texture, sampling: sampling, indexCount: UInt32(indexCount))
-    return BatchVertex.params(sampling)
+    return true
   }
 
   /// The key of a draw with the current state.
+  /// Unlike `??`, `if let` reads the target and the shader without a retain.
   private var drawKey: DrawKey {
-    DrawKey(
-      target: ObjectIdentifier(state.target ?? canvas),
-      shader: ObjectIdentifier(state.shader ?? defaultShader), blend: state.blend,
-      clip: state.clip, uniforms: state.uniforms)
+    let target =
+      if let target = state.target { ObjectIdentifier(target) } else { ObjectIdentifier(canvas) }
+    let shader =
+      if let shader = state.shader { ObjectIdentifier(shader) } else {
+        ObjectIdentifier(defaultShader)
+      }
+    return DrawKey(
+      target: target, shader: shader, blend: state.blend, clip: state.clip,
+      uniforms: state.uniforms)
   }
 
   /// Adds indices to the last command if the draw can join it, or to a new
@@ -350,17 +403,15 @@ extension Recorder {
   ///   - key: The key of the draw.
   ///   - texture: The texture, or nil for plain color. Plain color can use any
   ///     texture, so it keeps the batch of the last draw.
-  ///   - sampling: The settings of `texture`.
+  ///   - sampler: The sampler of `texture`.
   ///   - indexCount: The number of indices of the draw.
   private mutating func addToCommand(
-    _ key: DrawKey, texture: Texture?, sampling: Sampling?, indexCount: UInt32
+    _ key: DrawKey, texture: Texture?, sampler: OpaquePointer?, indexCount: UInt32
   ) {
-    let last = batch.commands.count - 1
-    if last >= 0
-      && batch.commands[last].join(
-        key, texture: texture, sampling: sampling, shaderTextures: state.shaderTextures,
-        samplers: samplers, white: white, indexCount: indexCount)
-    {
+    let joined = batch.lastCommand?.join(
+      key, texture: texture, sampler: sampler, state: state, samplers: samplers, white: white,
+      indexCount: indexCount)
+    if joined == true {
       return
     }
     let shader = state.shader ?? defaultShader
@@ -368,33 +419,40 @@ extension Recorder {
       kind: .draw(key), target: currentTarget, shader: shader, bindingCount: shader.textureCount,
       firstIndex: UInt32(batch.indices.count), indexCount: indexCount)
     command.bindings[0] = Binding(
-      texture: texture ?? white, sampler: samplers[sampling ?? white.sampling])
+      texture: texture ?? white, sampler: sampler ?? samplers[white.sampling])
     for slot in 1..<shader.textureCount {
       let bound = state.shaderTextures[slot] ?? white
       command.bindings[slot] = Binding(texture: bound, sampler: samplers[bound.sampling])
     }
-    batch.commands.append(command)
+    batch.start(command)
   }
 
-  /// Appends a quad.
+  /// Appends a quad of a texture.
   ///
   /// - Parameters:
-  ///   - texture: The texture, or nil for plain color.
-  ///   - corners: The corners in target pixels: top-left, top-right,
-  ///     bottom-right, bottom-left of the texture area.
+  ///   - texture: The texture.
+  ///   - quad: The corners in target pixels.
   ///   - uv: The top-left and bottom-right of the texture area.
   mutating func addQuad(
-    _ texture: Texture?, _ corners: [4 of Vec2], uv: (Vec2, Vec2), color: Color, overlay: Color
+    _ texture: Texture, _ quad: Quad, uv: (Vec2, Vec2), color: Color, overlay: Color
   ) {
     guard let params = beginDraw(texture, vertexCount: 4, indexCount: 6) else { return }
-    batch.addQuad(corners, uv: uv, color: color, overlay: overlay, params: params)
+    batch.addQuad(quad, uv: uv, color: color, overlay: overlay, params: params)
+  }
+
+  /// Appends a quad of plain color.
+  ///
+  /// - Parameter quad: The corners in target pixels.
+  mutating func addPlainQuad(_ quad: Quad, color: Color) {
+    guard beginPlainDraw(vertexCount: 4, indexCount: 6) else { return }
+    batch.addQuad(quad, uv: (.zero, .one), color: color, overlay: .transparent, params: .plain)
   }
 
   /// Fills a rectangle of target pixels. The transform does not apply.
   mutating func fill(x: Int, y: Int, width: Int, height: Int, color: Color) {
     let target = targetSize
-    guard width > 0, height > 0, x < target.width, y < target.height, x + width > 0,
-      y + height > 0
+    guard width > 0, height > 0, x < target.width, y < target.height, x &+ width > 0,
+      y &+ height > 0
     else {
       return
     }
@@ -402,26 +460,10 @@ extension Recorder {
     let y0 = Float(y)
     let x1 = Float(x) + Float(width)
     let y1 = Float(y) + Float(height)
-    addQuad(
-      nil, [Vec2(x0, y0), Vec2(x1, y0), Vec2(x1, y1), Vec2(x0, y1)], uv: (.zero, .one),
-      color: color, overlay: .transparent)
-  }
-
-  /// Moves the corners so that the first is on a whole pixel, if snap is on.
-  func snapped(_ corners: [4 of Vec2]) -> [4 of Vec2] {
-    guard state.snap else { return corners }
-    let offset = (corners[0] + 0.5).rounded(.down) - corners[0]
-    var moved = corners
-    for i in 0..<4 {
-      moved[i] += offset
-    }
-    return moved
-  }
-
-  /// Transforms a point, and rounds it if snap is on.
-  func vertexPosition(_ x: Float, _ y: Float) -> Vec2 {
-    let p = state.transform * Vec2(x, y)
-    return state.snap ? (p + 0.5).rounded(.down) : p
+    let quad = Quad(
+      topLeft: Vec2(x0, y0), topRight: Vec2(x1, y0), bottomRight: Vec2(x1, y1),
+      bottomLeft: Vec2(x0, y1))
+    addPlainQuad(quad, color: color)
   }
 
   /// Draws a Bresenham line between two pixels. Fills each straight run of
@@ -464,20 +506,23 @@ extension Recorder {
     var y = p0.y + (steep ? first * stepY : k * stepY)
     var runX = x
     var runY = y
+    // The coordinates are in the float range, so no step can overflow.
+    let twoMajor = 2 &* major
+    let twoMinor = 2 &* minor
     for i in first..<end {
       let turn = error > 0
-      let done = turn || i == end - 1
+      let done = turn || i == end &- 1
       if done {
         fill(
-          x: min(runX, x), y: min(runY, y), width: abs(x - runX) + 1, height: abs(y - runY) + 1,
-          color: color)
+          x: min(runX, x), y: min(runY, y), width: abs(x &- runX) &+ 1,
+          height: abs(y &- runY) &+ 1, color: color)
       }
       if turn {
-        if steep { x += stepX } else { y += stepY }
-        error -= 2 * major
+        if steep { x &+= stepX } else { y &+= stepY }
+        error &-= twoMajor
       }
-      error += 2 * minor
-      if steep { y += stepY } else { x += stepX }
+      error &+= twoMinor
+      if steep { y &+= stepY } else { x &+= stepX }
       if done {
         runX = x
         runY = y
@@ -485,43 +530,44 @@ extension Recorder {
     }
   }
 
-  /// A circle in target pixels.
-  struct Circle {
-    var x, y, radius: Int
-    /// The rows of the circle that are in the target.
-    var rows: ClosedRange<Int>
-  }
+}
+
+/// A circle in target pixels.
+struct Circle {
+  var x, y, radius: Int
+  /// The rows of the circle that are in the target.
+  var rows: Range<Int>
+
+  /// The largest radius in pixels.
+  static let maxRadius = 1 << 14
 
   /// Transforms a circle to target pixels. Returns nil if it is not seen.
-  func circleInTarget(_ center: Vec2, _ radius: Float) -> Circle? {
-    let t = state.transform
+  init?(center: Vec2, radius: Float, transform t: Transform, targetHeight: Int) {
     let c = t * center
     let r = roundHalfUp(radius * abs(t.a * t.d - t.b * t.c).squareRoot())
     guard r >= 0 else { return nil }
-    let x = pixel(c.x)
-    let y = pixel(c.y)
-    let radius = r < Float(maxRadius) ? Int(r) : maxRadius
-    let firstRow = max(-radius, -y)
-    let lastRow = min(radius, targetSize.height - 1 - y)
+    x = pixel(c.x)
+    y = pixel(c.y)
+    self.radius = r < Float(Self.maxRadius) ? Int(r) : Self.maxRadius
+    let firstRow = max(-self.radius, -y)
+    let lastRow = min(self.radius, targetHeight - 1 - y)
     guard firstRow <= lastRow else { return nil }
-    return Circle(x: x, y: y, radius: radius, rows: firstRow...lastRow)
+    rows = firstRow..<lastRow + 1
   }
 }
-
-/// The largest radius of a circle in pixels.
-private let maxRadius = 1 << 14
 
 /// Gets the half width of a row of a circle. The row holds the pixels with
 /// dx * dx + dy * dy <= r * (r + 1). Returns -1 for rows outside.
 func circleSpan(radius: Int, dy: Int) -> Int {
   guard (-radius...radius).contains(dy) else { return -1 }
-  let area = radius * (radius + 1) - dy * dy
+  // The radius is at most Circle.maxRadius, so nothing can overflow.
+  let area = radius &* (radius &+ 1) &- dy &* dy
   var half = Int(Float(area).squareRoot())
-  while (half + 1) * (half + 1) <= area {
-    half += 1
+  while (half &+ 1) &* (half &+ 1) <= area {
+    half &+= 1
   }
-  while half * half > area {
-    half -= 1
+  while half &* half > area {
+    half &-= 1
   }
   return half
 }
@@ -531,17 +577,20 @@ private let coordinateLimit: Float = 16_777_216
 
 /// Converts a whole float to an int. Clamps it to the exact float range. NaN
 /// gives the lower limit.
+@inline(always)
 func toInt(_ value: Float) -> Int {
   Int(Float.minimum(Float.maximum(value, -coordinateLimit), coordinateLimit))
 }
 
 /// Returns the pixel that holds a coordinate. Allows a small float error.
+@inline(always)
 func pixel(_ value: Float) -> Int {
   toInt((value + 1e-3).rounded(.down))
 }
 
 extension Texture {
   /// Gets the texture coordinates of an area in texels.
+  @inline(always)
   func uv(of area: Rect) -> (Vec2, Vec2) {
     let size = Vec2(Float(width), Float(height))
     return (Vec2(area.x, area.y) / size, Vec2(area.x + area.width, area.y + area.height) / size)

@@ -5,7 +5,9 @@ import CSDL3
 import Pxl
 
 let warmupFrames = 30
-let timedFrames = 300
+/// The number of timed frames: PXL_BENCH_FRAMES, or 300.
+let timedFrames = min(
+  max(SDL_getenv("PXL_BENCH_FRAMES").map { Int(SDL_atoi($0)) } ?? 300, 1), 10000)
 let spriteCount = 20000
 let shapeCount = 2000
 let textCount = 500

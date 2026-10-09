@@ -29,9 +29,12 @@ public final class Texture {
     set { sampling.wrap = newValue }
   }
 
-  /// The filter and the wrap mode. Swift checks each access to a stored
-  /// property of a class at run time, so a draw reads both in one access.
-  var sampling: Sampling
+  /// The filter and the wrap mode. Each draw reads them.
+  ///
+  /// Swift does not check access to it at run time: the check costs more than
+  /// the draw. Two accesses cannot overlap. `Texture` is not `Sendable`, so
+  /// one thread uses it, and no access calls code that could access it again.
+  @exclusivity(unchecked) var sampling: Sampling
 
   /// pxl can draw into the texture. See `Context.target`.
   public let isRenderTarget: Bool

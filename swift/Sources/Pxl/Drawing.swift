@@ -116,6 +116,6 @@ extension Context {
   ///
   /// - Returns: The width of the widest line and the height of all lines.
   public func measureText(_ text: String) -> Vec2 {
-    recorder.measureText(text)
+    (recorder.state.font ?? recorder.defaultFont).measure(text)
   }
 }

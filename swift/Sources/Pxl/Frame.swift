@@ -92,6 +92,7 @@ extension Context {
     }
     stats.vertices = recorder.batch.vertices.count
     stats.indices = recorder.batch.indices.count
+    recorder.batch.closeCommands()
     let uploaded = uploadGeometry(cmd)
     if uploaded {
       renderCommands(cmd)
@@ -114,19 +115,18 @@ extension Context {
     }
     let first = UInt32(recorder.batch.indices.count)
     let r = viewport
+    let quad = Quad(
+      topLeft: Vec2(r.x, r.y), topRight: Vec2(r.x + r.width, r.y),
+      bottomRight: Vec2(r.x + r.width, r.y + r.height), bottomLeft: Vec2(r.x, r.y + r.height))
     recorder.batch.addQuad(
-      [
-        Vec2(r.x, r.y), Vec2(r.x + r.width, r.y), Vec2(r.x + r.width, r.y + r.height),
-        Vec2(r.x, r.y + r.height),
-      ], uv: (.zero, .one), color: .white, overlay: .transparent,
-      params: [0, sharp ? 255 : 0, 0, 0]
-    )
+      quad, uv: (.zero, .one), color: .white, overlay: .transparent,
+      params: VertexParams(untextured: 0, sharp: sharp ? 255 : 0))
     return first
   }
 
   /// Uploads the vertices and indices of the frame to the GPU.
   private func uploadGeometry(_ cmd: OpaquePointer) -> Bool {
-    guard !recorder.batch.vertices.isEmpty else { return true }
+    guard recorder.batch.vertices.count > 0 else { return true }
     let vertexBytes = recorder.batch.vertices.count * MemoryLayout<BatchVertex>.stride
     let indexBytes = recorder.batch.indices.count * MemoryLayout<UInt32>.stride
     guard let vertexSize = UInt32(exactly: vertexBytes),

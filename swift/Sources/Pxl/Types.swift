@@ -128,6 +128,7 @@ public struct Transform: Hashable, Sendable {
   }
 
   /// Combines two transforms: `r` applies first, then `l`.
+  @inline(always)
   public static func * (l: Transform, r: Transform) -> Transform {
     Transform(
       a: l.a * r.a + l.c * r.b,
@@ -139,8 +140,16 @@ public struct Transform: Hashable, Sendable {
   }
 
   /// Applies a transform to a point.
+  @inline(always)
   public static func * (t: Transform, p: Vec2) -> Vec2 {
     Vec2(t.a * p.x + t.c * p.y + t.tx, t.b * p.x + t.d * p.y + t.ty)
+  }
+
+  /// Transforms a point, and rounds it to a whole pixel if `snap` is true.
+  @inline(always)
+  func vertex(_ x: Float, _ y: Float, snapped snap: Bool) -> Vec2 {
+    let p = self * Vec2(x, y)
+    return snap ? (p + 0.5).rounded(.down) : p
   }
 }
 

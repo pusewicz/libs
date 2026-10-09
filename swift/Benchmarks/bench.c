@@ -9,7 +9,7 @@
 #include "pxl.h"
 
 static constexpr int warmup_frames = 30;
-static constexpr int timed_frames  = 300;
+static constexpr int max_frames    = 10000;
 static constexpr int sprite_count  = 20000;
 static constexpr int shape_count   = 2000;
 static constexpr int text_count    = 500;
@@ -73,12 +73,19 @@ static double milliseconds(uint64_t start, uint64_t end) {
   return (double)(end - start) * 1000.0 / (double)SDL_GetPerformanceFrequency();
 }
 
+/** Returns the number of timed frames: PXL_BENCH_FRAMES, or 300. */
+static int timed_frames() {
+  const char* value = SDL_getenv("PXL_BENCH_FRAMES");
+  int frames        = value ? SDL_atoi(value) : 300;
+  return SDL_clamp(frames, 1, max_frames);
+}
+
 /** Runs a workload. Prints the median times and the work of the last frame. */
 static bool run(SDL_GPUDevice* device, pxl_context* pxl, pxl_texture* sprite,
-                const workload* w) {
-  static double record[timed_frames];
-  static double end[timed_frames];
-  for (int frame = 0; frame < warmup_frames + timed_frames; ++frame) {
+                const workload* w, int frames) {
+  static double record[max_frames];
+  static double end[max_frames];
+  for (int frame = 0; frame < warmup_frames + frames; ++frame) {
     uint64_t t0 = SDL_GetPerformanceCounter();
     pxl_begin_frame(pxl);
     pxl_clear(pxl, pxl_black);
@@ -98,7 +105,7 @@ static bool run(SDL_GPUDevice* device, pxl_context* pxl, pxl_texture* sprite,
   }
   pxl_stats stats = pxl_get_stats(pxl);
   printf("%-8s %10.3f %10.3f %6zu %9zu %9zu\n", w->name,
-         median(record, timed_frames), median(end, timed_frames),
+         median(record, (size_t)frames), median(end, (size_t)frames),
          stats.draw_calls, stats.vertices, stats.indices);
   return true;
 }
@@ -141,7 +148,7 @@ int main(int argc, char* argv[]) {
   bool ok             = sprite != nullptr;
   if (ok) {
     printf("C, %s, median of %d frames in ms\n", SDL_GetGPUDeviceDriver(device),
-           timed_frames);
+           timed_frames());
     printf("%-8s %10s %10s %6s %9s %9s\n", "workload", "record", "end_frame",
            "draws", "vertices", "indices");
     const workload workloads[] = {
@@ -151,7 +158,7 @@ int main(int argc, char* argv[]) {
     };
     for (size_t i = 0; ok && i < SDL_arraysize(workloads); ++i) {
       if (selected(workloads[i].name, argc, argv)) {
-        ok = run(device, pxl, sprite, &workloads[i]);
+        ok = run(device, pxl, sprite, &workloads[i], timed_frames());
       }
     }
   } else {

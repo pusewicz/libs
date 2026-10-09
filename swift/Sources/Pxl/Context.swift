@@ -36,8 +36,13 @@ public final class Context {
   /// The work of the last frame.
   public internal(set) var stats = Stats()
 
-  /// The draw state and the draws of the frame.
-  var recorder: Recorder
+  /// The draw state and the draws of the frame. Each draw changes it.
+  ///
+  /// Swift does not check access to it at run time: the check costs more than
+  /// a sprite. Two accesses cannot overlap. `Context` is not `Sendable`, so one
+  /// thread uses it, and no method of `Recorder` calls code that could access
+  /// it again.
+  @exclusivity(unchecked) var recorder: Recorder
   let vertexShader: Shader
   let vertexBuffer: GrowingBuffer
   let indexBuffer: GrowingBuffer
@@ -186,6 +191,7 @@ func fit(canvasWidth: Int, canvasHeight: Int, windowWidth: Int, windowHeight: In
 }
 
 /// Rounds to the nearest whole number, halves up.
+@inline(always)
 func roundHalfUp(_ value: Float) -> Float {
   (value + 0.5).rounded(.down)
 }

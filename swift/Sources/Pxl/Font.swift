@@ -1,5 +1,6 @@
-/// A bitmap font: a texture with one glyph in each cell of a grid.
-public struct Font {
+/// A bitmap font: a texture with one glyph in each cell of a grid. It does not
+/// change after it is made.
+public final class Font {
   /// The glyph sheet.
   public let texture: Texture
 
@@ -64,7 +65,7 @@ public struct Font {
 
   /// Creates the built-in font: glyphs of 5 x 9 pixels in cells of 6 x 10
   /// texels.
-  init(builtInFor device: Device) throws(PxlError) {
+  convenience init(builtInFor device: Device) throws(PxlError) {
     let glyphWidth = 5
     let glyphHeight = 9
     let cellWidth = 6
@@ -104,6 +105,25 @@ public struct Font {
   /// Gets the advance of a glyph in pixels.
   func advance(_ glyph: Int) -> Float {
     advances.map { Float($0[glyph]) } ?? Float(glyphWidth)
+  }
+
+  /// Measures text as `Context.drawText(_:at:color:)` draws it.
+  ///
+  /// - Returns: The width of the widest line and the height of all lines.
+  func measure(_ text: String) -> Vec2 {
+    var width: Float = 0
+    var line: Float = 0
+    var lines = text.isEmpty ? 0 : 1
+    for scalar in text.unicodeScalars {
+      if scalar == "\n" {
+        line = 0
+        lines += 1
+      } else if let glyph = glyph(for: scalar) {
+        line += advance(glyph)
+        width = Float.maximum(width, line)
+      }
+    }
+    return Vec2(width, Float(lines) * Float(lineHeight))
   }
 
   /// Gets the area of a glyph in the texture.
