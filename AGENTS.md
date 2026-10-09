@@ -18,6 +18,10 @@ development. Each library is one header file.
 - `<name>.h` - the library. A user needs only this file.
 - `tests/<name>/` - the tests for the library.
 - `examples/<name>/` - the examples for the library.
+- `tools/<name>/` - the sources and scripts that generate parts of the
+  library, and its Rake tasks (`<name>.rake`).
+- `tools/linux/`, `tools/windows/` - the Docker images of `rake linux` and
+  `rake windows`.
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
 - `build/` - the build output. Do not commit it.
@@ -31,6 +35,9 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 - `rake test` - build and run the tests with clang and gcc, with ASan and
   UBSan.
 - `rake format` - format the sources.
+- `rake linux` - run clang-tidy, the tests and the examples on Linux, in
+  Docker.
+- `rake windows` - build the tests and the examples for Windows, in Docker.
 - `rake fuzz[SECONDS]` - fuzz the parsers with libFuzzer. Clang only.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
   `:` between directories. Do not give it `build/`: some test files there
@@ -42,6 +49,8 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
   `$CC @compile_flags.txt -o build/x tests/<name>/x.c`.
 - Compile with clang and with gcc. Both must give zero warnings.
 - clang-tidy and clangd read `compile_flags.txt` automatically.
+- If a library needs a package, add its pkg-config name to `PACKAGES` in the
+  Rakefile. The tasks then add its flags.
 - On macOS, use Homebrew LLVM clang and `gcc-16`. Do not use Apple clang. It
   does not support all of C23. Set `CLANG` or `GCC` to use other compilers.
 - Run `clang-tidy` on the files that define `<NAME>_IMPLEMENTATION`. On the
@@ -50,6 +59,7 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 ## Tests
 
 - Use pico_unit (`third_party/pico_unit.h`).
+- Add the test programs of a library to `TESTS` in the Rakefile.
 - Do not commit binary test files. A Ruby script in `tests/<name>/` writes
   them to `build/`.
 - Test the error paths too: truncated data, bad values and failed
