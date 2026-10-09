@@ -11,8 +11,11 @@
 #   pxl_shader* wave = pxl_create_shader(pxl, &wave_frag);
 #
 # It needs glslc, spirv-val and spirv-cross in PATH, and dxc in PATH or in
-# $DXC. Without dxc, it runs the Linux release of DXC in Docker.
+# $DXC. If there is no dxc, it downloads the DXC release for Linux x86_64.
+# It runs the release directly on Linux x86_64, and in Docker on macOS,
+# because Microsoft has no DXC for macOS.
 
+require "digest"
 require "fileutils"
 require "json"
 require "open3"
@@ -22,6 +25,8 @@ require "tmpdir"
 module PxlShaders
   DXC_VERSION = "v1.9.2609"
   DXC_ARCHIVE = "linux_dxc_2026_09_28.x86_x64.tar.gz"
+  DXC_SHA256 = "96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1"
+  DXC_DOCKER_IMAGE = "ubuntu:24.04"
   MAX_TEXTURES = 4
   FRAGMENT_INPUTS = { 0 => "vec2", 1 => "vec4", 2 => "vec4", 3 => "vec4" }.freeze
 
@@ -34,30 +39,66 @@ module PxlShaders
     output
   end
 
+  # Returns the absolute path of a program in PATH, or nil.
   def which(name)
-    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |dir| File.join(dir, name) }
-       .find { |path| File.file?(path) && File.executable?(path) }
+    program = "#{name}#{RbConfig::CONFIG['EXEEXT']}"
+    path = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).map { |dir| File.join(dir, program) }
+              .find { |candidate| File.file?(candidate) && File.executable?(candidate) }
+    path && File.expand_path(path)
   end
 
-  # Returns the command that runs DXC. It writes into `work_dir`.
-  def dxc_command(work_dir, cache_dir)
+  # Returns the command of the DXC that the user gives: $DXC, or dxc in
+  # PATH. Returns nil if there is none.
+  def user_dxc
     return ENV["DXC"].shellsplit if ENV["DXC"] && !ENV["DXC"].empty?
 
     dxc = which("dxc")
-    return [dxc] if dxc
+    [dxc] if dxc
+  end
 
-    abort("dxc not found. Set DXC, put dxc in PATH, or install Docker.") unless which("docker")
-    dir = File.expand_path(File.join(cache_dir, "dxc"))
-    unless File.exist?(File.join(dir, "bin", "dxc"))
-      FileUtils.mkdir_p(dir)
-      archive = File.join(dir, DXC_ARCHIVE)
-      url = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/#{DXC_VERSION}/#{DXC_ARCHIVE}"
-      run("curl", "-fsSL", "-o", archive, url)
-      run("tar", "-xzf", archive, "-C", dir)
+  # Returns how this system runs the DXC release for Linux x86_64: :native
+  # on Linux x86_64, :docker on macOS, or nil.
+  def release_mode
+    if RUBY_PLATFORM.include?("x86_64-linux")
+      :native
+    elsif RUBY_PLATFORM.include?("darwin")
+      :docker
     end
+  end
+
+  # Returns the path of the DXC release in `cache_dir`.
+  def release_dxc(cache_dir)
+    File.join(File.expand_path(cache_dir), "dxc", "bin", "dxc")
+  end
+
+  # Returns the command that runs DXC: the DXC of the user, else the DXC
+  # release in `cache_dir`. It downloads the release once. On macOS, the
+  # release runs in Docker, with `work_dir` mounted.
+  def dxc_command(cache_dir, work_dir)
+    user = user_dxc
+    return user if user
+
+    mode = release_mode
+    abort("dxc not found. Put dxc in PATH or set DXC.") unless mode
+    release = release_dxc(cache_dir)
+    download_dxc(File.dirname(release, 2)) unless File.exist?(release)
+    return [release] if mode == :native
+
+    abort("dxc not found. On macOS, DXC runs in Docker: install Docker, or set DXC.") unless which("docker")
     work = File.expand_path(work_dir)
-    ["docker", "run", "--rm", "--platform", "linux/amd64", "-v", "#{dir}:/dxc:ro", "-v", "#{work}:#{work}",
-     "ubuntu:24.04", "/dxc/bin/dxc"]
+    FileUtils.mkdir_p(work)
+    ["docker", "run", "--rm", "--platform", "linux/amd64", "-v", "#{File.dirname(release, 2)}:/dxc:ro",
+     "-v", "#{work}:#{work}", DXC_DOCKER_IMAGE, "/dxc/bin/dxc"]
+  end
+
+  # Downloads the DXC release into `dir`, and checks it.
+  def download_dxc(dir)
+    FileUtils.mkdir_p(dir)
+    archive = File.join(dir, DXC_ARCHIVE)
+    url = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/#{DXC_VERSION}/#{DXC_ARCHIVE}"
+    run("curl", "-fsSL", "-o", archive, url)
+    abort("#{archive}: the SHA-256 is not #{DXC_SHA256}") unless Digest::SHA256.file(archive).hexdigest == DXC_SHA256
+    run("tar", "-xzf", archive, "-C", dir)
   end
 
   # Checks that a shader binds its resources where SDL GPU wants them.
@@ -169,7 +210,7 @@ if $PROGRAM_NAME == __FILE__
   abort("usage: ruby #{__FILE__} -o OUTPUT.h SHADER.frag...") if output.nil? || sources.empty?
 
   work_dir = File.join(Dir.tmpdir, "pxl-shaders-#{Process.pid}")
-  dxc = PxlShaders.dxc_command(work_dir, File.join(Dir.home, ".cache", "pxl"))
+  dxc = PxlShaders.dxc_command(File.join(Dir.home, ".cache", "pxl"), work_dir)
   shaders = sources.to_h { |source| [PxlShaders.c_name(source), PxlShaders.compile(source, work_dir, dxc)] }
   File.write(output, PxlShaders.header(shaders))
   FileUtils.rm_rf(work_dir)

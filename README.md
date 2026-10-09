@@ -56,4 +56,6 @@ pkg-config and SDL3. Then run `rake check`. `rake test` uses the compiler in
 `CC`, or `cc`.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
-font. It needs glslc, spirv-cross and spirv-val, and DXC or Docker.
+font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it
+downloads the DXC release for Linux. It runs it directly on Linux x86_64, and
+in Docker on macOS.
