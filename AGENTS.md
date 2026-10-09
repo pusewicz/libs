@@ -85,11 +85,41 @@ Use the STB pattern:
 - Use only the C standard library. Put optional dependencies behind a
   `<NAME>_` macro. Exception: a library for one platform API, for example
   `pxl.h` for SDL3 GPU, uses that API.
-- Let the user replace the allocation functions that the library uses and
-  the assertions, for example with `<NAME>_MALLOC`, `<NAME>_FREE` and
-  `<NAME>_ASSERT`.
+- Let the user replace the assertions with `<NAME>_ASSERT`. For memory, see
+  "Memory".
 - Do not use global mutable state. Keep state in a context that the user
   owns.
+
+## Memory
+
+A library allocates only through two macros. The user can define them
+before the implementation. Define both or none.
+
+- `<NAME>_ALLOC(size, alignment)` returns the memory, or `nullptr`.
+- `<NAME>_FREE(pointer, size)` releases it.
+
+The library promises this to the user:
+
+- `size` is more than 0.
+- `alignment` is a power of two, at most `alignof(max_align_t)`.
+- `<NAME>_FREE` gets the same `size` that `<NAME>_ALLOC` got. It never
+  gets `nullptr`.
+- The library does not reallocate. To grow an array, it allocates a new
+  array, copies the data, and frees the old array.
+- The library calls the macros only on the thread that called the library.
+
+In the implementation:
+
+- Call the macros only through two static functions that assert these
+  promises.
+- Write defaults that use both arguments, for example
+  `((void)(alignment), malloc(size))` and `((void)(size), free(pointer))`.
+  If a default drops an argument, a value that the library computes only
+  for that macro gives an unused-variable warning.
+- Test the macros in `tests/<name>/test_options.c` with a counting
+  allocator. It keeps the size in a header before each block, and checks
+  the pointer and the size at each free. After each test, no block is
+  left. The test makes each allocation fail in turn.
 
 ## C23
 
