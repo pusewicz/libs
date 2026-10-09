@@ -80,6 +80,7 @@ TEST_CASE(test_macros_back_the_default_allocator) {
 }
 
 TEST_CASE(test_caller_block_does_not_allocate) {
+  alignas(max_align_t) static unsigned char block[1 << 16];
   size_t size   = 0;
   uint8_t* data = read_fixture("rgba", &size);
   if (!data) {
@@ -90,8 +91,7 @@ TEST_CASE(test_caller_block_does_not_allocate) {
   size_t used = sprite.memory_used;
   aseprite_free(&sprite);
 
-  void* block = aligned_alloc(alignof(max_align_t), used);
-  ok          = ok && block != nullptr;
+  ok = ok && used <= sizeof block;
   if (ok) {
     allocations              = 0;
     releases                 = 0;
@@ -100,7 +100,6 @@ TEST_CASE(test_caller_block_does_not_allocate) {
     aseprite_free(&sprite);
     ok = ok && allocations == 0 && releases == 0;
   }
-  free(block);
   free(data);
   REQUIRE(ok);
   return true;

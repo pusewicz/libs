@@ -830,6 +830,10 @@ TEST_CASE(test_allocator_failures) {
   return true;
 }
 
+// The caller block of the tests. It is aligned, and not from malloc: the
+// Windows C runtime has no aligned_alloc.
+alignas(max_align_t) static unsigned char test_block[1 << 16];
+
 // Checks that the bytes after the usable part of a block are unchanged.
 static bool canary_intact(const unsigned char* block, size_t size,
                           size_t total) {
@@ -860,8 +864,8 @@ static bool check_caller_block(const char* name, bool from_file) {
     size_t size          = sizes[i];
     size_t total         = (size + canary_size + alignof(max_align_t) - 1) &
                            ~(alignof(max_align_t) - 1);
-    unsigned char* block = aligned_alloc(alignof(max_align_t), total);
-    if (!block) {
+    unsigned char* block = test_block;
+    if (total > sizeof test_block) {
       return false;
     }
     memset(block, 0, size);
@@ -888,7 +892,6 @@ static bool check_caller_block(const char* name, bool from_file) {
            sprite.memory_used == 0;
     }
     ok = ok && canary_intact(block, size, total);
-    free(block);
   }
   if (!ok) {
     fprintf(stderr, "caller block test failed for %s (file: %d)\n", name,
