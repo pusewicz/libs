@@ -9,6 +9,34 @@ All libraries use the [zlib license](LICENSE).
 | [aseprite.h](aseprite.h)   | Reads Aseprite files (`.ase`, `.aseprite`).   |
 | [pxl.h](pxl.h)             | Draws pixel-art games with SDL3 GPU.          |
 
+## aseprite.h
+
+aseprite reads a file into an `aseprite_sprite`. A load uses malloc and free
+unless you choose the memory.
+
+```c
+aseprite_sprite sprite;
+aseprite_result result = aseprite_load_file("hero.aseprite", nullptr, &sprite);
+```
+
+To load without any allocation, give a block. The sprite reports the bytes it
+used, so you can size the block for the next load. A block that is too small
+gives `ASEPRITE_ERROR_NO_MEMORY`.
+
+```c
+alignas(max_align_t) static unsigned char block[1 << 20];
+
+aseprite_sprite sprite;
+aseprite_options options = {.memory = block, .memory_size = sizeof block};
+if (aseprite_load_file("hero.aseprite", &options, &sprite) == ASEPRITE_OK) {
+  // sprite.memory_used is the least block size for this file.
+  aseprite_free(&sprite); // The block is free again.
+}
+```
+
+To use your own allocator, for example an arena, set `options.allocator`:
+`alloc(user, size, alignment)` and `release(user, pointer, size)`.
+
 ## pxl.h
 
 pxl draws into a small canvas, for example 320 x 180, and scales it to the

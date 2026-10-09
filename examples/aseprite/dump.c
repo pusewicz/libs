@@ -216,6 +216,7 @@ static void print_tilesets(const aseprite_sprite* sprite) {
 static void print_sprite(const aseprite_sprite* sprite) {
   printf("size: %ux%u, depth %u, flags %" PRIu32 "\n", (unsigned)sprite->width,
          (unsigned)sprite->height, (unsigned)sprite->depth, sprite->flags);
+  printf("memory: %zu bytes\n", sprite->memory_used);
   printf("palettes: %" PRIu32 ", first has %" PRIu32 " colors\n",
          sprite->palette_count, sprite->palettes[0].count);
   printf("color profile: type %u\n", (unsigned)sprite->color_profile.type);
