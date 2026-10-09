@@ -17,17 +17,19 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     size_t used = sprite.memory_used;
     aseprite_free(&sprite);
 
-    // The extra bytes catch a write after the end of the block.
-    void* block =
-        aligned_alloc(alignof(max_align_t), used + alignof(max_align_t));
-    walk_check(block != nullptr, "block");
+    // The extra bytes catch a write after the end of the block. The block is
+    // aligned by hand, because the Windows C runtime has no aligned_alloc.
+    unsigned char* storage = malloc(used + (2 * alignof(max_align_t)));
+    walk_check(storage != nullptr, "block");
+    size_t padding = (size_t)(-(uintptr_t)storage) & (alignof(max_align_t) - 1);
+    unsigned char* block     = storage + padding;
     aseprite_options options = {.memory = block, .memory_size = used};
     walk_check(aseprite_load_memory(data, size, &options, &sprite) ==
                    ASEPRITE_OK,
                "memory_used is enough");
     walk_check(sprite.memory_used == used, "memory_used is stable");
     aseprite_free(&sprite);
-    free(block);
+    free(storage);
   }
   return 0;
 }
