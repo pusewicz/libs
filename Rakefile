@@ -26,6 +26,7 @@ PACKAGES = { "pxl" => %w[sdl3] }.freeze
 # The test programs of each library: program => the C files in tests/<name>/.
 TESTS = {
   "aseprite" => { "test_aseprite" => %w[test_aseprite consumer], "test_options" => %w[test_options] },
+  "pxl" => { "test_pxl" => %w[test_pxl], "test_options" => %w[test_options] },
 }.freeze
 
 # The arguments of the test programs of each library.
