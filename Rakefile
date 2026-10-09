@@ -7,7 +7,10 @@
 #   PKG_CONFIG  The pkg-config program. Default: pkg-config.
 #   SANITIZE=0  Build the tests and the examples without sanitizers.
 #   EXE         The suffix of programs, for example ".exe".
+#
+# Tasks run in parallel. "rake -j N" runs at most N tasks at a time.
 
+require "monitor"
 require "open3"
 require "rake/clean"
 require "shellwords"
@@ -32,7 +35,37 @@ TESTS = {
 # The arguments of the test programs of each library.
 TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
 
+# The compilers: name => the environment variable and the programs to find.
+COMPILERS = { "clang" => %w[CLANG clang], "gcc" => %w[GCC gcc-16 gcc-15 gcc] }.freeze
+
+# run captures the output of the tools, so they do not see the terminal. These
+# flags keep their colors.
+COMPILER_COLOR = $stdout.tty? ? %w[-fdiagnostics-color=always] : []
+TIDY_COLOR = $stdout.tty? ? %w[--use-color] : []
+
 CLEAN.include(BUILD)
+
+MEMO = {}
+MEMO_LOCK = Monitor.new
+OUTPUT_LOCK = Mutex.new
+
+# Returns the value of a key. Calculates it with the block only once, also
+# when tasks run in parallel.
+def memoize(key)
+  MEMO_LOCK.synchronize { MEMO.fetch(key) { MEMO[key] = yield } }
+end
+
+# Runs a command and prints it with its output in one block, so that the
+# output of parallel tasks does not mix. Raises an error if the command fails.
+def run(*command)
+  output, status = Open3.capture2e(*command)
+  OUTPUT_LOCK.synchronize do
+    rake_output_message(command.join(" ")) if Rake::FileUtilsExt.verbose_flag
+    $stdout.write(output)
+    $stdout.flush
+  end
+  raise "Command failed with status (#{status.exitstatus}): #{command.join(' ')}" unless status.success?
+end
 
 # Finds a tool. An environment variable wins, then Homebrew LLVM, then PATH.
 def tool(variable, *names)
@@ -46,8 +79,8 @@ def tool(variable, *names)
   abort "#{variable}: none of #{names.join(', ')} found"
 end
 
-def compilers
-  { "clang" => tool("CLANG", "clang"), "gcc" => tool("GCC", "gcc-16", "gcc-15", "gcc") }
+def compiler(name)
+  tool(*COMPILERS.fetch(name))
 end
 
 # Returns the library of a file in tests/<name>/ or examples/<name>/.
@@ -71,14 +104,12 @@ end
 
 # Returns the compile and link flags of the packages of a library.
 def package_flags(library)
-  @package_flags ||= {}
-  @package_flags[library] ||= query_packages(PACKAGES.fetch(library, []))
+  memoize([:packages, library]) { query_packages(PACKAGES.fetch(library, [])) }
 end
 
 # Returns the run paths that a compiler adds to each program.
 def default_rpaths(compiler)
-  @default_rpaths ||= {}
-  @default_rpaths[compiler] ||= begin
+  memoize([:rpaths, compiler]) do
     output, = Open3.capture2e(*compiler.shellsplit, "-###", "-x", "c", File::NULL, "-o", File::NULL)
     output.scan(/"?-rpath"?\s+"?([^"\s]+)"?/).flatten
   end
@@ -104,24 +135,21 @@ def compile(compiler, sources, output, flags = build_flags, console: false)
   library = library_of(sources.first)
   cflags, = package_flags(library)
   mkdir_p File.dirname(output)
-  sh(*compiler.shellsplit, "@compile_flags.txt", *flags, *cflags, "-o", output, *sources,
-     *link_flags(compiler, library, console: console), "-lm")
+  run(*compiler.shellsplit, "@compile_flags.txt", *COMPILER_COLOR, *flags, *cflags, "-o", output, *sources,
+      *link_flags(compiler, library, console: console), "-lm")
 end
 
 def build_flags
   ENV["SANITIZE"] == "0" ? %w[-g -O1] : SANITIZE
 end
 
-# Builds the test programs with a compiler. Returns each program and its
-# library.
-def build_tests(name, compiler)
-  TESTS.flat_map do |library, programs|
-    programs.map do |program, files|
-      output = "#{BUILD}/#{name}/#{library}/#{program}#{EXE}"
-      compile(compiler, files.map { "tests/#{library}/#{_1}.c" }, output, console: true)
-      [output, library]
-    end
-  end
+# Defines a task that compiles C files into a program, and returns its name.
+# The name is the path of the program without EXE, with ":" for "/", for
+# example "build:clang:aseprite:test_aseprite".
+def program_task(compiler_name, sources, output, console: false)
+  name = output.delete_suffix(EXE).tr("/", ":")
+  task(name) { compile(compiler(compiler_name), sources, output, console: console) }
+  name
 end
 
 file "#{FIXTURES}/rgba.aseprite" => "tests/aseprite/fixtures.rb" do
@@ -131,28 +159,36 @@ end
 desc "Write the test fixtures"
 task fixtures: "#{FIXTURES}/rgba.aseprite"
 
-desc "Build and run the tests with clang and gcc"
-task test: :fixtures do
-  compilers.each do |name, compiler|
-    build_tests(name, compiler).each { |output, library| sh output, *TEST_ARGUMENTS.fetch(library, []) }
-  end
-end
-
-namespace :build do
-  desc "Build the tests with clang and gcc, but do not run them"
-  task tests: :fixtures do
-    compilers.each { |name, compiler| build_tests(name, compiler) }
-  end
-end
-
-desc "Build the examples with clang and gcc"
-task :examples do
-  compilers.each do |name, compiler|
-    FileList["examples/**/*.c"].each do |source|
-      compile(compiler, source, "#{BUILD}/#{name}/#{source.delete_suffix('.c')}#{EXE}")
+test_builds = []
+test_runs = []
+COMPILERS.each_key do |name|
+  TESTS.each do |library, programs|
+    programs.each do |program, files|
+      output = "#{BUILD}/#{name}/#{library}/#{program}#{EXE}"
+      build = program_task(name, files.map { "tests/#{library}/#{_1}.c" }, output, console: true)
+      test_run = task("test:#{name}:#{library}:#{program}" => [:fixtures, build]) do
+        run(output, *TEST_ARGUMENTS.fetch(library, []))
+      end
+      test_builds << build
+      test_runs << test_run.name
     end
   end
 end
+
+desc "Build and run the tests with clang and gcc"
+multitask test: test_runs
+
+namespace :build do
+  desc "Build the tests with clang and gcc, but do not run them"
+  multitask tests: test_builds
+end
+
+example_builds = COMPILERS.keys.product(FileList["examples/**/*.c"].to_a).map do |name, source|
+  program_task(name, source, "#{BUILD}/#{name}/#{source.delete_suffix('.c')}#{EXE}")
+end
+
+desc "Build the examples with clang and gcc"
+multitask examples: example_builds
 
 desc "Format the sources"
 task :format do
@@ -162,22 +198,26 @@ end
 namespace :format do
   desc "Check the format of the sources"
   task :check do
-    sh tool("CLANG_FORMAT", "clang-format"), "--dry-run", "--Werror", *SOURCES
+    run tool("CLANG_FORMAT", "clang-format"), "--dry-run", "--Werror", *SOURCES
   end
 end
 
-desc "Run clang-tidy on the files that compile the implementation"
-task :tidy do
-  extra = TIDY_SOURCES.map { library_of(_1) }.uniq.flat_map { package_flags(_1).first }.uniq
-  sh tool("CLANG_TIDY", "clang-tidy"), "--quiet", *extra.map { "--extra-arg=#{_1}" }, *TIDY_SOURCES
+tidy_tasks = TIDY_SOURCES.map do |source|
+  task("tidy:#{source}") do
+    cflags, = package_flags(library_of(source))
+    run tool("CLANG_TIDY", "clang-tidy"), "--quiet", *TIDY_COLOR, *cflags.map { "--extra-arg=#{_1}" }, source
+  end.name
 end
+
+desc "Run clang-tidy on the files that compile the implementation"
+multitask tidy: tidy_tasks
 
 desc "Fuzz aseprite_load_memory with libFuzzer (clang only)"
 task :fuzz, [:seconds] => :fixtures do |_, args|
   seconds = args.fetch(:seconds, "60")
   output = "#{BUILD}/fuzz/fuzz_aseprite"
   corpus = "#{BUILD}/fuzz/corpus"
-  compile(compilers.fetch("clang"), "tests/aseprite/fuzz.c", output,
+  compile(compiler("clang"), "tests/aseprite/fuzz.c", output,
           %w[-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all])
   mkdir_p corpus
   cp FileList["#{FIXTURES}/*.aseprite"], corpus
@@ -192,7 +232,7 @@ task :sweep, [:directories] do |_, args|
   files = directories.flat_map { |dir| Dir.glob(File.join(dir, "**", "*.{ase,aseprite}"), File::FNM_DOTMATCH) }
   abort "no files found in #{directories.join(', ')}" if files.empty?
   output = "#{BUILD}/sweep/sweep"
-  compile(compilers.fetch("clang"), "tests/aseprite/sweep.c", output)
+  compile(compiler("clang"), "tests/aseprite/sweep.c", output)
   sh(output, *files, verbose: false) { |ok, _| abort "sweep: some files did not load" unless ok }
 end
 
@@ -219,7 +259,7 @@ task :windows do
 end
 
 desc "Check format, tidy and tests (the definition of done)"
-task check: ["format:check", :tidy, :test, :examples]
+multitask check: ["format:check", :tidy, :test, :examples]
 
 task default: :check
 
