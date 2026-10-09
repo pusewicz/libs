@@ -5,27 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static size_t allocations        = 0;
-static size_t releases           = 0;
-static size_t failing_allocation = 0;
-static size_t asserts            = 0;
+#include "counting.h"
 
-// Counts allocations. It fails the allocation that the test selects.
-static void* counting_malloc(size_t size) {
-  allocations++;
-  if (allocations == failing_allocation) {
-    return nullptr;
-  }
-  return malloc(size);
-}
-
-// Counts releases.
-static void counting_free(void* pointer) {
-  if (pointer) {
-    releases++;
-  }
-  free(pointer);
-}
+static size_t asserts = 0;
 
 // Counts asserts.
 static void counting_assert(bool condition) {
@@ -36,8 +18,8 @@ static void counting_assert(bool condition) {
 }
 
 #define ASEPRITE_NO_STDIO
-#define ASEPRITE_MALLOC(size) counting_malloc(size)
-#define ASEPRITE_FREE(pointer) counting_free(pointer)
+#define ASEPRITE_ALLOC(size, alignment) counting_alloc(size, alignment)
+#define ASEPRITE_FREE(pointer, size) counting_free(pointer, size)
 #define ASEPRITE_ASSERT(expr) counting_assert(expr)
 #define ASEPRITE_IMPLEMENTATION
 #include "aseprite.h"
@@ -72,21 +54,19 @@ static bool check_allocation_failures(const char* name) {
     return false;
   }
   allocations        = 0;
-  releases           = 0;
   failing_allocation = 0;
   aseprite_sprite sprite;
   bool ok       = aseprite_load_memory(data, size, &sprite) == ASEPRITE_OK;
   size_t needed = allocations;
   aseprite_free(&sprite);
-  ok = ok && needed > 0 && releases == allocations;
+  ok = ok && needed > 0 && counting_is_clean();
 
   for (size_t i = 1; ok && i <= needed; i++) {
     allocations        = 0;
-    releases           = 0;
     failing_allocation = i;
     ok =
         aseprite_load_memory(data, size, &sprite) == ASEPRITE_ERROR_NO_MEMORY &&
-        sprite.memory == nullptr && releases == allocations - 1;
+        sprite.memory == nullptr && counting_is_clean();
   }
   failing_allocation = 0;
   free(data);
@@ -98,7 +78,7 @@ static bool check_allocation_failures(const char* name) {
 
 TEST_CASE(test_allocation_failures) {
   static const char* const names[] = {
-      "rgba", "indexed", "tilemap", "properties", "tags", "slices",
+      "rgba", "indexed", "tilemap", "properties", "tags", "slices", "large",
   };
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
     REQUIRE(check_allocation_failures(names[i]));
@@ -111,6 +91,7 @@ TEST_CASE(test_custom_assert) {
   aseprite_sprite sprite = {};
   aseprite_free(&sprite);
   REQUIRE(asserts > before);
+  REQUIRE(counting_is_clean());
   return true;
 }
 

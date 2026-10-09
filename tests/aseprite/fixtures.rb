@@ -359,10 +359,16 @@ module Fixtures
     file([frame(frame0, old_count: 0xFFFF), frame(frame1, new_count: 0)])
   end
 
+  # A cel of 160000 bytes. The loader puts it in a block of its own.
+  def large
+    file([frame([layer("layer"), image_cel(0, 200, 200, zeros(200 * 200 * 4))])], width: 200, height: 200)
+  end
+
   def valid
     {
       "rgba" => rgba, "grayscale" => grayscale, "indexed" => indexed, "tilemap" => tilemap,
-      "tags" => tagged, "slices" => sliced, "properties" => property_file, "uuid" => uuid_file, "skipped" => skipped
+      "tags" => tagged, "slices" => sliced, "properties" => property_file, "uuid" => uuid_file, "skipped" => skipped,
+      "large" => large
     }
   end
 
