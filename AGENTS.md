@@ -73,7 +73,8 @@ Use the STB pattern:
    and short usage.
 2. The public API inside the include guard `<NAME>_H`.
 3. The implementation inside `#ifdef <NAME>_IMPLEMENTATION`. The user defines
-   this macro in one translation unit only.
+   this macro in one translation unit only. Guard the implementation, so that
+   a second include in that unit is safe.
 
 - Stop the build with `#error` if `__STDC_VERSION__` is less than `202311L`.
 - Prefix all public identifiers with `<name>_`. Prefix all macros with
@@ -82,7 +83,8 @@ Use the STB pattern:
 - Write a short Doxygen comment for each public declaration. Give the
   purpose, the parameters, the return value and who owns the memory.
 - Use only the C standard library. Put optional dependencies behind a
-  `<NAME>_` macro.
+  `<NAME>_` macro. Exception: a library for one platform API, for example
+  `pxl.h` for SDL3 GPU, uses that API.
 - Let the user replace the allocation functions that the library uses and
   the assertions, for example with `<NAME>_MALLOC`, `<NAME>_FREE` and
   `<NAME>_ASSERT`.
