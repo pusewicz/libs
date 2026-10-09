@@ -85,9 +85,18 @@ Use the STB pattern:
 - Use only the C standard library. Put optional dependencies behind a
   `<NAME>_` macro. Exception: a library for one platform API, for example
   `pxl.h` for SDL3 GPU, uses that API.
-- Let the user replace the allocation functions that the library uses and
-  the assertions, for example with `<NAME>_MALLOC`, `<NAME>_FREE` and
-  `<NAME>_ASSERT`.
+- Give the user control of the memory:
+  - If the need is known before setup, give `<name>_memory_size()` and a
+    function that takes a block from the caller. Do not allocate after setup.
+  - If the need depends on the input, take a `<name>_allocator` in an options
+    struct. Also take a block from the caller, and report the bytes that the
+    load used. A zeroed allocator uses malloc and free.
+  - An allocator has `alloc(user, size, alignment)`, `release(user, pointer,
+    size)` and `user`. Do not name a member `free`: some C runtimes define
+    `free` as a macro. Each header defines its own allocator type. Do not
+    share types between headers.
+- Let the user replace the default allocation functions and the assertions
+  with `<NAME>_MALLOC`, `<NAME>_FREE` and `<NAME>_ASSERT`.
 - Do not use global mutable state. Keep state in a context that the user
   owns.
 

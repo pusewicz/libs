@@ -8,7 +8,7 @@ int main(int argc, char** argv) {
   int failed = 0;
   for (int i = 1; i < argc; i++) {
     aseprite_sprite sprite;
-    aseprite_result result = aseprite_load_file(argv[i], &sprite);
+    aseprite_result result = aseprite_load_file(argv[i], nullptr, &sprite);
     if (result != ASEPRITE_OK) {
       printf("%s: %s\n", argv[i], aseprite_result_string(result));
       failed++;
