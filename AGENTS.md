@@ -19,7 +19,9 @@ development. Each library is one header file.
 - `tests/<name>/` - the tests for the library.
 - `examples/<name>/` - the examples for the library.
 - `tools/<name>/` - the sources and scripts that generate parts of the
-  library, and its Rake tasks (`<name>.rake`).
+  library.
+- `rakelib/<name>.rake` - the Rake tasks of the library. Rake loads them
+  automatically.
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
 - `build/` - the build output. Do not commit it.

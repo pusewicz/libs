@@ -3,8 +3,8 @@
 # Tasks that generate parts of pxl.h, and the shaders of its tests and
 # examples.
 
-require_relative "font"
-require_relative "shaders"
+require_relative "../tools/pxl/font"
+require_relative "../tools/pxl/shaders"
 
 module Pxl
   HEADER = "pxl.h"

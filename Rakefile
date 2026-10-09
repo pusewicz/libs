@@ -45,7 +45,7 @@ TEST_ARGUMENTS = { "aseprite" => [FIXTURES] }.freeze
 # symbols.
 TEST_ENVIRONMENT = { "VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING" => "1" }.freeze
 
-# The rows that tools/*/*.rake add to the banner: label => a block that
+# The rows that rakelib/*.rake add to the banner: label => a block that
 # returns the value.
 BANNER_ROWS = {}
 
@@ -268,8 +268,6 @@ multitask check: ["format:check", :tidy, :test, :examples]
 
 task default: :check
 
-Dir["tools/*/*.rake"].each { |file| load file }
-
 # Returns the path, the flags and the version of a command, for example
 # "/usr/bin/cc: Apple clang version 21.0.0", or "not found". If the command
 # has no --version, it gives the target of the path, which often has the
@@ -365,4 +363,14 @@ def print_banner
   $stdout.flush
 end
 
-print_banner unless Rake.application.options.show_tasks || Rake.application.options.show_prereqs
+# Prints the banner before the tasks run. Rake loads rakelib/ after this
+# file, so the banner cannot print here.
+module BannerBeforeTasks
+  # Runs the tasks, or shows them for "rake -T" and "rake -P".
+  def top_level
+    print_banner unless options.show_tasks || options.show_prereqs
+    super
+  end
+end
+
+Rake.application.singleton_class.prepend(BannerBeforeTasks)
