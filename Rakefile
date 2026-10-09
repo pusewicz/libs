@@ -236,28 +236,6 @@ task :sweep, [:directories] do |_, args|
   sh(output, *files, verbose: false) { |ok, _| abort "sweep: some files did not load" unless ok }
 end
 
-# Builds the Docker image in tools/<name>/ and runs a shell command in it, on
-# a copy of the sources: the build must not mix with the build of the host.
-def docker(name, command)
-  image = "libs-#{name}"
-  sh "docker", "build", "-q", "-t", image, "-f", "tools/#{name}/Dockerfile", "tools/#{name}"
-  copy = "tar -C /src --exclude=./build --exclude=./.git -cf - . | tar -xf -"
-  sh "docker", "run", "--rm", "-v", "#{Dir.pwd}:/src:ro", image, "sh", "-c", "#{copy} && #{command}"
-end
-
-# The format check stays on the host: clang-format versions format differently.
-desc "Run clang-tidy, the tests and the examples on Linux, in Docker"
-task :linux do
-  docker("linux", "rake tidy test examples")
-end
-
-desc "Build the tests and the examples for Windows with MinGW gcc and clang, in Docker"
-task :windows do
-  docker("windows", "SANITIZE=0 EXE=.exe PKG_CONFIG=x86_64-w64-mingw32-pkg-config " \
-                    "GCC=x86_64-w64-mingw32-gcc CLANG='clang --target=x86_64-w64-mingw32 -fuse-ld=lld' " \
-                    "rake build:tests examples")
-end
-
 desc "Check format, tidy and tests (the definition of done)"
 multitask check: ["format:check", :tidy, :test, :examples]
 

@@ -20,8 +20,6 @@ development. Each library is one header file.
 - `examples/<name>/` - the examples for the library.
 - `tools/<name>/` - the sources and scripts that generate parts of the
   library, and its Rake tasks (`<name>.rake`).
-- `tools/linux/`, `tools/windows/` - the Docker images of `rake linux` and
-  `rake windows`.
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
 - `build/` - the build output. Do not commit it.
@@ -35,9 +33,6 @@ Rake drives the build. `rake -T` lists the tasks. Do not use CMake.
 - `rake test` - build and run the tests with clang and gcc, with ASan and
   UBSan.
 - `rake format` - format the sources.
-- `rake linux` - run clang-tidy, the tests and the examples on Linux, in
-  Docker.
-- `rake windows` - build the tests and the examples for Windows, in Docker.
 - `rake fuzz[SECONDS]` - fuzz the parsers with libFuzzer. Clang only.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
   `:` between directories. Do not give it `build/`: some test files there
