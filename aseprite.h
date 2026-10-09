@@ -51,9 +51,9 @@
 
 /** The result of a load. */
 typedef enum aseprite_result : uint8_t {
-  ASEPRITE_OK,                 /**< The load is successful. */
-  ASEPRITE_ERROR_IO,           /**< The file cannot be opened or read. */
-  ASEPRITE_ERROR_NO_MEMORY,    /**< An allocation failed. */
+  ASEPRITE_OK,              /**< The load is successful. */
+  ASEPRITE_ERROR_IO,        /**< The file cannot be opened or read. */
+  ASEPRITE_ERROR_NO_MEMORY, /**< An allocation failed, or the block is small. */
   ASEPRITE_ERROR_NOT_ASEPRITE, /**< The data is not an Aseprite file. */
   ASEPRITE_ERROR_TRUNCATED,    /**< The data ends too soon. */
   ASEPRITE_ERROR_MALFORMED,    /**< A value in the file is not valid. */
@@ -436,10 +436,23 @@ typedef struct aseprite_allocator {
   void* user;
 } aseprite_allocator;
 
-/** The settings of a load. A zeroed struct, or nullptr, gives the defaults. */
+/**
+ * The settings of a load. A zeroed struct, or nullptr, gives the defaults.
+ * Use an allocator or a memory block, not both.
+ */
 typedef struct aseprite_options {
   /** The memory of the sprite. Release it with aseprite_free(). */
   aseprite_allocator allocator;
+  /**
+   * A block for all the memory of the sprite, aligned to
+   * alignof(max_align_t), or nullptr. The load does not allocate. It fails
+   * with ASEPRITE_ERROR_NO_MEMORY if the block is too small. The sprite
+   * points into the block: keep the block until aseprite_free(), then reuse
+   * it. aseprite_load_file() also keeps the file data in the block, for the
+   * time of the load.
+   */
+  void* memory;
+  size_t memory_size; /**< The size of memory in bytes. */
 } aseprite_options;
 
 /**
@@ -477,6 +490,12 @@ typedef struct aseprite_sprite {
   aseprite_external_file* external_files;
   aseprite_color_profile color_profile;
   aseprite_user_data user_data;
+  /**
+   * The size of a memory block that loads the same data with the same
+   * function. Use it to size aseprite_options.memory. Read it before
+   * aseprite_free(), which empties the sprite.
+   */
+  size_t memory_used;
   void* memory;                 /**< Internal. Do not change. */
   aseprite_allocator allocator; /**< Internal. Do not change. */
 } aseprite_sprite;
@@ -667,9 +686,18 @@ struct aseprite_block {
   alignas(max_align_t) unsigned char data[];
 };
 
+// Where a load gets its memory: a caller block, or else the allocator.
+typedef struct aseprite_memory {
+  aseprite_allocator allocator;
+  unsigned char* block;
+  size_t block_size;
+} aseprite_memory;
+
 typedef struct aseprite_arena {
   aseprite_block* head;
-  aseprite_allocator allocator;
+  aseprite_memory memory;
+  /** The bytes given so far. In a caller block it is the next offset. */
+  size_t used;
 } aseprite_arena;
 
 static void* aseprite_default_alloc([[maybe_unused]] void* user, size_t size,
@@ -682,21 +710,29 @@ static void aseprite_default_release([[maybe_unused]] void* user, void* pointer,
   ASEPRITE_FREE(pointer);
 }
 
-// Returns the allocator of the options, with the defaults for a zeroed one.
-static aseprite_allocator
-aseprite_resolve_allocator(const aseprite_options* options) {
-  aseprite_allocator allocator =
-      options ? options->allocator : (aseprite_allocator){};
-  ASEPRITE_ASSERT((allocator.alloc != nullptr) ==
-                  (allocator.release != nullptr));
-  if (!allocator.alloc) {
-    allocator = (aseprite_allocator){
-        .alloc   = aseprite_default_alloc,
-        .release = aseprite_default_release,
-        .user    = allocator.user,
-    };
+// Returns the memory of the options, with the defaults for a zeroed one.
+static aseprite_memory
+aseprite_resolve_memory(const aseprite_options* options) {
+  aseprite_options zero = {};
+  if (!options) {
+    options = &zero;
   }
-  return allocator;
+  ASEPRITE_ASSERT((options->allocator.alloc != nullptr) ==
+                  (options->allocator.release != nullptr));
+  ASEPRITE_ASSERT(!options->memory || !options->allocator.alloc);
+  ASEPRITE_ASSERT(options->memory || options->memory_size == 0);
+  ASEPRITE_ASSERT(((uintptr_t)options->memory & (aseprite_alignment - 1)) == 0);
+
+  aseprite_memory memory = {
+      .allocator  = options->allocator,
+      .block      = options->memory,
+      .block_size = options->memory_size,
+  };
+  if (!memory.allocator.alloc) {
+    memory.allocator.alloc   = aseprite_default_alloc;
+    memory.allocator.release = aseprite_default_release;
+  }
+  return memory;
 }
 
 // Releases a list of blocks.
@@ -727,14 +763,8 @@ static aseprite_block* aseprite_new_block(const aseprite_allocator* allocator,
   return block;
 }
 
-// Returns aligned memory that lives until aseprite_arena_free().
-static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
-  size_t rounded = 0;
-  if (ckd_add(&rounded, size, aseprite_alignment - 1)) {
-    return nullptr;
-  }
-  rounded &= ~(aseprite_alignment - 1);
-
+// Gives rounded bytes from the blocks of the allocator.
+static void* aseprite_alloc_blocks(aseprite_arena* arena, size_t rounded) {
   aseprite_block* head = arena->head;
   if (head && head->size - head->used >= rounded) {
     void* memory = head->data + head->used;
@@ -743,7 +773,8 @@ static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
   }
 
   if (head && rounded > aseprite_block_size / 4) {
-    aseprite_block* block = aseprite_new_block(&arena->allocator, rounded);
+    aseprite_block* block =
+        aseprite_new_block(&arena->memory.allocator, rounded);
     if (!block) {
       return nullptr;
     }
@@ -755,7 +786,8 @@ static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
 
   size_t size_of_block =
       rounded > aseprite_block_size ? rounded : aseprite_block_size;
-  aseprite_block* block = aseprite_new_block(&arena->allocator, size_of_block);
+  aseprite_block* block =
+      aseprite_new_block(&arena->memory.allocator, size_of_block);
   if (!block) {
     return nullptr;
   }
@@ -763,6 +795,31 @@ static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
   block->next = head;
   arena->head = block;
   return block->data;
+}
+
+// Returns aligned memory that lives until aseprite_arena_free(). The arena
+// counts the rounded sizes, so a caller block of arena->used bytes is enough.
+static void* aseprite_alloc(aseprite_arena* arena, size_t size) {
+  size_t rounded = 0;
+  size_t used    = 0;
+  if (ckd_add(&rounded, size, aseprite_alignment - 1)) {
+    return nullptr;
+  }
+  rounded &= ~(aseprite_alignment - 1);
+  if (ckd_add(&used, arena->used, rounded)) {
+    return nullptr;
+  }
+
+  void* memory = nullptr;
+  if (!arena->memory.block) {
+    memory = aseprite_alloc_blocks(arena, rounded);
+  } else if (used <= arena->memory.block_size) {
+    memory = arena->memory.block + arena->used;
+  }
+  if (memory) {
+    arena->used = used;
+  }
+  return memory;
 }
 
 // Returns zeroed memory for count items, or nullptr on failure.
@@ -2682,11 +2739,10 @@ static aseprite_result aseprite_read_frames(aseprite_parser* parser,
 
 /* ---- Public functions -------------------------------------------------- */
 
-aseprite_result aseprite_load_memory(const void* data, size_t size,
-                                     const aseprite_options* options,
+// Loads from resolved memory. A caller block must have room for the sprite.
+static aseprite_result aseprite_load(const void* data, size_t size,
+                                     aseprite_memory memory,
                                      aseprite_sprite* sprite) {
-  ASEPRITE_ASSERT(sprite);
-  ASEPRITE_ASSERT(data || size == 0);
   *sprite = (aseprite_sprite){};
   if (size == 0) {
     return ASEPRITE_ERROR_TRUNCATED;
@@ -2696,10 +2752,9 @@ aseprite_result aseprite_load_memory(const void* data, size_t size,
     size = UINT32_MAX;
   }
 
-  aseprite_allocator allocator = aseprite_resolve_allocator(options);
-  aseprite_parser parser       = {
+  aseprite_parser parser = {
       .sprite           = sprite,
-      .arena            = {.allocator = allocator},
+      .arena            = {.memory = memory},
       .target           = ASEPRITE_TARGET_OBJECT,
       .target_user_data = &sprite->user_data,
   };
@@ -2724,16 +2779,66 @@ aseprite_result aseprite_load_memory(const void* data, size_t size,
     result = aseprite_read_frames(&parser, file);
   }
   if (result != ASEPRITE_OK) {
-    aseprite_arena_free(parser.arena.head, &allocator);
+    aseprite_arena_free(parser.arena.head, &memory.allocator);
     *sprite = (aseprite_sprite){};
     return result;
   }
-  sprite->memory    = parser.arena.head;
-  sprite->allocator = allocator;
+  sprite->memory      = parser.arena.head;
+  sprite->memory_used = parser.arena.used;
+  sprite->allocator   = memory.allocator;
   return ASEPRITE_OK;
 }
 
+aseprite_result aseprite_load_memory(const void* data, size_t size,
+                                     const aseprite_options* options,
+                                     aseprite_sprite* sprite) {
+  ASEPRITE_ASSERT(sprite);
+  ASEPRITE_ASSERT(data || size == 0);
+  return aseprite_load(data, size, aseprite_resolve_memory(options), sprite);
+}
+
 #ifndef ASEPRITE_NO_STDIO
+// Reads size bytes of a file and loads them. In a caller block, the file data
+// is at the top end of the block and the sprite gets the rest.
+static aseprite_result aseprite_load_stream(FILE* file, size_t size,
+                                            aseprite_memory memory,
+                                            aseprite_sprite* sprite) {
+  size_t capacity   = size > 0 ? size : 1;
+  size_t file_bytes = 0;
+  if (ckd_add(&file_bytes, capacity, aseprite_alignment - 1)) {
+    return ASEPRITE_ERROR_NO_MEMORY;
+  }
+  file_bytes &= ~(aseprite_alignment - 1);
+
+  uint8_t* data = nullptr;
+  if (memory.block) {
+    size_t top = memory.block_size & ~(aseprite_alignment - 1);
+    if (file_bytes > top) {
+      return ASEPRITE_ERROR_NO_MEMORY;
+    }
+    memory.block_size = top - file_bytes;
+    data              = memory.block + memory.block_size;
+  } else {
+    data = memory.allocator.alloc(memory.allocator.user, capacity,
+                                  alignof(uint8_t));
+    if (!data) {
+      return ASEPRITE_ERROR_NO_MEMORY;
+    }
+  }
+
+  aseprite_result result = ASEPRITE_ERROR_IO;
+  if (fread(data, 1, size, file) == size) {
+    result = aseprite_load(data, size, memory, sprite);
+  }
+  if (!memory.block) {
+    memory.allocator.release(memory.allocator.user, data, capacity);
+  }
+  if (result == ASEPRITE_OK) {
+    sprite->memory_used += file_bytes;
+  }
+  return result;
+}
+
 aseprite_result aseprite_load_file(const char* path,
                                    const aseprite_options* options,
                                    aseprite_sprite* sprite) {
@@ -2751,17 +2856,8 @@ aseprite_result aseprite_load_file(const char* path,
     size = ftell(file);
   }
   if (size >= 0 && fseek(file, 0, SEEK_SET) == 0) {
-    aseprite_allocator allocator = aseprite_resolve_allocator(options);
-    size_t capacity              = size > 0 ? (size_t)size : 1;
-    uint8_t* data = allocator.alloc(allocator.user, capacity, alignof(uint8_t));
-    if (!data) {
-      result = ASEPRITE_ERROR_NO_MEMORY;
-    } else {
-      if (fread(data, 1, (size_t)size, file) == (size_t)size) {
-        result = aseprite_load_memory(data, (size_t)size, options, sprite);
-      }
-      allocator.release(allocator.user, data, capacity);
-    }
+    result = aseprite_load_stream(file, (size_t)size,
+                                  aseprite_resolve_memory(options), sprite);
   }
   (void)fclose(file);
   return result;
