@@ -14,7 +14,10 @@
 //   swapchain is a texture too. Submit copies it to the canvas, flipped.
 //
 // Not supported: compute, storage buffers and textures, indirect draws,
-// textures that are not 2D, multisampling, and BGRA formats.
+// textures that are not 2D, multisampling, BGRA formats, reading depth
+// textures, and a draw into one level of a texture that samples another
+// level of it. A buffer with index usage can only hold indices: WebGL keeps
+// index buffers apart from other buffers. Vertex pitches are at most 255.
 
 #include <GLES3/gl3.h>
 #include <SDL3/SDL.h>
@@ -37,6 +40,8 @@ constexpr Uint32 gpu_texture_units = 2 * gpu_max_samplers;
 constexpr Uint32 gpu_work_unit = gpu_texture_units - 1;
 /** The anisotropy parameter of EXT_texture_filter_anisotropic. */
 constexpr GLenum gpu_max_anisotropy = 0x84FE;
+/** The largest vertex pitch of WebGL 2. */
+constexpr Uint32 gpu_max_vertex_pitch = 255;
 
 typedef enum gpu_stage : Uint8 {
   GPU_STAGE_VERTEX,
@@ -53,6 +58,7 @@ typedef enum gpu_feature : Uint8 {
   GPU_FEATURE_FORMAT,
   GPU_FEATURE_FILL_MODE,
   GPU_FEATURE_SHADER_FORMAT,
+  GPU_FEATURE_DEPTH_READ,
   GPU_FEATURE_COUNT,
 } gpu_feature;
 
@@ -79,6 +85,20 @@ typedef struct gpu_format {
   gpu_format_kind kind;
 } gpu_format;
 
+/**
+ * A uniform slot. A draw fails in WebGL if the buffer is smaller than the
+ * block of the shader, so the slot keeps the pushed data and pads it.
+ */
+typedef struct gpu_uniforms {
+  GLuint buffer;
+  Uint8* data;
+  Uint32 length, capacity;
+  /** The size of the buffer in WebGL. */
+  Uint32 size;
+  /** The data changed after the last upload. */
+  bool dirty;
+} gpu_uniforms;
+
 /** A vertex element format in WebGL terms. */
 typedef struct gpu_vertex_format {
   GLint size;
@@ -98,7 +118,7 @@ struct SDL_GPUDevice {
   GLuint pass_framebuffer;
   /** The framebuffers of copies, blits and downloads. */
   GLuint read_framebuffer, draw_framebuffer;
-  GLuint uniform_buffers[2][gpu_max_uniform_buffers];
+  gpu_uniforms uniforms[2][gpu_max_uniform_buffers];
   /** The textures in the texture units, to break feedback loops. */
   SDL_GPUTexture* units[gpu_texture_units];
   Uint32 enabled_attributes;
@@ -153,6 +173,8 @@ struct SDL_GPUGraphicsPipeline {
   SDL_GPUDepthStencilState depth_stencil;
   /** WebGL 2 has one blend state for all targets: the one of target 0. */
   SDL_GPUColorTargetBlendState blend;
+  /** The sizes of the uniform blocks, by stage and slot. 0: not used. */
+  Uint32 block_sizes[2][gpu_max_uniform_buffers];
   bool alpha_to_coverage;
 };
 
@@ -207,6 +229,7 @@ static void gpu_unsupported(SDL_GPUDevice* device, gpu_feature feature) {
       [GPU_FEATURE_FORMAT]        = "this texture format",
       [GPU_FEATURE_FILL_MODE]     = "the line fill mode",
       [GPU_FEATURE_SHADER_FORMAT] = "shaders that are not SPIR-V",
+      [GPU_FEATURE_DEPTH_READ]    = "reading depth textures",
   };
   SDL_SetError("WebGL 2 GPU: %s is not supported", names[feature]);
   Uint32 bit = 1u << feature;
@@ -655,12 +678,12 @@ static void gpu_create_objects(SDL_GPUDevice* device) {
   device->read_framebuffer = framebuffers[1];
   device->draw_framebuffer = framebuffers[2];
   for (size_t stage = 0; stage < 2; ++stage) {
-    glGenBuffers((GLsizei)gpu_max_uniform_buffers,
-                 device->uniform_buffers[stage]);
     for (size_t slot = 0; slot < gpu_max_uniform_buffers; ++slot) {
+      gpu_uniforms* u = &device->uniforms[stage][slot];
+      glGenBuffers(1, &u->buffer);
       glBindBufferBase(GL_UNIFORM_BUFFER,
                        (GLuint)((stage * gpu_max_uniform_buffers) + slot),
-                       device->uniform_buffers[stage][slot]);
+                       u->buffer);
     }
   }
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -734,8 +757,10 @@ void SDL_DestroyGPUDevice(SDL_GPUDevice* device) {
                                  device->draw_framebuffer};
   glDeleteFramebuffers(3, framebuffers);
   for (size_t stage = 0; stage < 2; ++stage) {
-    glDeleteBuffers((GLsizei)gpu_max_uniform_buffers,
-                    device->uniform_buffers[stage]);
+    for (size_t slot = 0; slot < gpu_max_uniform_buffers; ++slot) {
+      glDeleteBuffers(1, &device->uniforms[stage][slot].buffer);
+      SDL_free(device->uniforms[stage][slot].data);
+    }
   }
   emscripten_webgl_destroy_context(device->context);
   SDL_DestroyProperties(device->props);
@@ -1295,8 +1320,12 @@ void SDL_UnmapGPUTransferBuffer(
 // ---------------------------------------------------------------------------
 // Pipelines
 
-/** Links a program and binds its samplers and uniform blocks. */
-static GLuint gpu_link_program(const SDL_GPUShader* vertex,
+/**
+ * Links a program and binds its samplers and uniform blocks. Writes the
+ * sizes of the blocks to the pipeline.
+ */
+static GLuint gpu_link_program(SDL_GPUGraphicsPipeline* pipeline,
+                               const SDL_GPUShader* vertex,
                                const SDL_GPUShader* fragment) {
   GLuint program = glCreateProgram();
   glAttachShader(program, vertex->shader);
@@ -1311,6 +1340,9 @@ static GLuint gpu_link_program(const SDL_GPUShader* vertex,
     glDeleteProgram(program);
     return 0;
   }
+  // A pass can create a pipeline. Keep the program of its bound pipeline.
+  GLint current = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, &current);
   glUseProgram(program);
   const SDL_GPUShader* shaders[] = {vertex, fragment};
   for (size_t i = 0; i < SDL_arraysize(shaders); ++i) {
@@ -1332,9 +1364,14 @@ static GLuint gpu_link_program(const SDL_GPUShader* vertex,
       if (index != GL_INVALID_INDEX) {
         glUniformBlockBinding(program, index,
                               ((Uint32)stage * gpu_max_uniform_buffers) + slot);
+        GLint size = 0;
+        glGetActiveUniformBlockiv(program, index, GL_UNIFORM_BLOCK_DATA_SIZE,
+                                  &size);
+        pipeline->block_sizes[stage][slot] = (Uint32)SDL_max(size, 0);
       }
     }
   }
+  glUseProgram((GLuint)current);
   return program;
 }
 
@@ -1351,6 +1388,10 @@ static bool gpu_set_vertex_input(SDL_GPUGraphicsPipeline* pipeline,
     if (d->slot >= gpu_max_vertex_buffers) {
       return SDL_SetError("WebGL 2 GPU: vertex buffer slot %u is too high",
                           (unsigned)d->slot);
+    }
+    if (d->pitch > gpu_max_vertex_pitch) {
+      return SDL_SetError("WebGL 2 GPU: the vertex pitch %u is above %u",
+                          (unsigned)d->pitch, (unsigned)gpu_max_vertex_pitch);
     }
     pipeline->pitches[d->slot] = d->pitch;
     pipeline->divisors[d->slot] =
@@ -1410,8 +1451,8 @@ SDL_GPUGraphicsPipeline* SDL_CreateGPUGraphicsPipeline(
     SDL_free(pipeline);
     return nullptr;
   }
-  pipeline->program =
-      gpu_link_program(createinfo->vertex_shader, createinfo->fragment_shader);
+  pipeline->program = gpu_link_program(pipeline, createinfo->vertex_shader,
+                                       createinfo->fragment_shader);
   if (!pipeline->program) {
     SDL_free(pipeline);
     return nullptr;
@@ -1468,15 +1509,51 @@ void SDL_PushGPUDebugGroup(
 void SDL_PopGPUDebugGroup(
     [[maybe_unused]] SDL_GPUCommandBuffer* command_buffer) {}
 
-/** Sets the data of a uniform buffer. Draws that come after use it. */
+/** Sets the data of a uniform slot. Draws that come after use it. */
 static void gpu_push_uniforms(SDL_GPUCommandBuffer* cmd, gpu_stage stage,
                               Uint32 slot, const void* data, Uint32 length) {
   if (!cmd || !data || slot >= gpu_max_uniform_buffers) {
     gpu_invalid(!cmd ? "command_buffer" : !data ? "data" : "slot_index");
     return;
   }
-  glBindBuffer(GL_UNIFORM_BUFFER, cmd->device->uniform_buffers[stage][slot]);
-  glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)length, data, GL_DYNAMIC_DRAW);
+  gpu_uniforms* u = &cmd->device->uniforms[stage][slot];
+  if (length > u->capacity) {
+    Uint8* grown = SDL_realloc(u->data, length);
+    if (!grown) {
+      return;
+    }
+    u->data     = grown;
+    u->capacity = length;
+  }
+  SDL_memcpy(u->data, data, length);
+  u->length = length;
+  u->dirty  = true;
+}
+
+/**
+ * Uploads the uniform data of the slots that a pipeline uses, padded with
+ * zeros to the size of each block.
+ */
+static void gpu_upload_uniforms(SDL_GPUDevice* device,
+                                const SDL_GPUGraphicsPipeline* pipeline) {
+  for (size_t stage = 0; stage < 2; ++stage) {
+    for (size_t slot = 0; slot < gpu_max_uniform_buffers; ++slot) {
+      Uint32 block    = pipeline->block_sizes[stage][slot];
+      gpu_uniforms* u = &device->uniforms[stage][slot];
+      Uint32 size     = SDL_max(u->length, block);
+      if (block == 0 || (!u->dirty && u->size >= size)) {
+        continue;
+      }
+      glBindBuffer(GL_UNIFORM_BUFFER, u->buffer);
+      glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)size, nullptr,
+                   GL_DYNAMIC_DRAW);
+      if (u->length > 0) {
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)u->length, u->data);
+      }
+      u->size  = size;
+      u->dirty = false;
+    }
+  }
 }
 
 void SDL_PushGPUVertexUniformData(SDL_GPUCommandBuffer* command_buffer,
@@ -1659,6 +1736,7 @@ SDL_GPURenderPass* SDL_BeginGPURenderPass(
   glDisable(GL_SCISSOR_TEST);
   glViewport(0, 0, (GLsizei)width, (GLsizei)height);
   glDepthRangef(0.0f, 1.0f);
+  glBlendColor(1.0f, 1.0f, 1.0f, 1.0f);
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   for (Uint32 i = 0; i < num_color_targets; ++i) {
     if (color_target_infos[i].load_op == SDL_GPU_LOADOP_CLEAR) {
@@ -1710,13 +1788,12 @@ static void gpu_apply_rasterizer(const SDL_GPURasterizerState* r) {
 }
 
 static void gpu_apply_depth(const SDL_GPUDepthStencilState* ds) {
-  // WebGL writes depth only when the test is on. ALWAYS writes without a
-  // test.
-  bool test = ds->enable_depth_test || ds->enable_depth_write;
-  gpu_enable(GL_DEPTH_TEST, test);
-  glDepthFunc(ds->enable_depth_test ? GPU_MAP(gpu_compare_ops, ds->compare_op)
-                                    : GL_ALWAYS);
-  glDepthMask(ds->enable_depth_write ? GL_TRUE : GL_FALSE);
+  // SDL, like WebGL, writes depth only when the depth test is on.
+  gpu_enable(GL_DEPTH_TEST, ds->enable_depth_test);
+  if (ds->enable_depth_test) {
+    glDepthFunc(GPU_MAP(gpu_compare_ops, ds->compare_op));
+  }
+  glDepthMask(ds->enable_depth_test && ds->enable_depth_write);
   gpu_enable(GL_STENCIL_TEST, ds->enable_stencil_test);
 }
 
@@ -1903,12 +1980,12 @@ void SDL_BindGPUFragmentStorageBuffers(
 }
 
 /**
- * Points the vertex attributes of the pipeline at the bound vertex buffers.
- * WebGL 2 has no base vertex or base instance, so the offsets move the
- * attributes instead.
+ * Points the vertex attributes of the pipeline at the bound vertex buffers,
+ * and uploads the uniforms. WebGL 2 has no base vertex or base instance, so
+ * the offsets move the attributes instead.
  */
-static bool gpu_bind_attributes(SDL_GPURenderPass* pass, Sint64 vertex_offset,
-                                Uint32 first_instance) {
+static bool gpu_prepare_draw(SDL_GPURenderPass* pass, Sint64 vertex_offset,
+                             Uint32 first_instance) {
   const SDL_GPUGraphicsPipeline* p = pass->pipeline;
   SDL_GPUDevice* device            = pass->command_buffer->device;
   if (!p) {
@@ -1923,6 +2000,11 @@ static bool gpu_bind_attributes(SDL_GPURenderPass* pass, Sint64 vertex_offset,
     Uint32 divisor                      = p->divisors[a->buffer_slot];
     if (!binding->buffer) {
       return SDL_SetError("WebGL 2 GPU: no vertex buffer in slot %u",
+                          (unsigned)a->buffer_slot);
+    }
+    if (binding->buffer->target != GL_ARRAY_BUFFER) {
+      return SDL_SetError("WebGL 2 GPU: the buffer in vertex slot %u has "
+                          "index usage. WebGL keeps index buffers apart.",
                           (unsigned)a->buffer_slot);
     }
     Sint64 first = divisor ? (Sint64)(first_instance / divisor) : vertex_offset;
@@ -1952,6 +2034,7 @@ static bool gpu_bind_attributes(SDL_GPURenderPass* pass, Sint64 vertex_offset,
     }
   }
   device->enabled_attributes = enabled;
+  gpu_upload_uniforms(device, p);
   return true;
 }
 
@@ -1968,7 +2051,7 @@ void SDL_DrawGPUIndexedPrimitives(SDL_GPURenderPass* render_pass,
     SDL_SetError("WebGL 2 GPU: indexed draw without an index buffer");
     return;
   }
-  if (!gpu_bind_attributes(render_pass, vertex_offset, first_instance)) {
+  if (!gpu_prepare_draw(render_pass, vertex_offset, first_instance)) {
     return;
   }
   uintptr_t offset =
@@ -1986,7 +2069,7 @@ void SDL_DrawGPUPrimitives(SDL_GPURenderPass* render_pass, Uint32 num_vertices,
     gpu_invalid("render_pass");
     return;
   }
-  if (!gpu_bind_attributes(render_pass, 0, first_instance)) {
+  if (!gpu_prepare_draw(render_pass, 0, first_instance)) {
     return;
   }
   glDrawArraysInstanced(render_pass->pipeline->mode, (GLint)first_vertex,
@@ -2084,12 +2167,47 @@ static bool gpu_fits(Uint64 offset, Uint64 size, Uint64 capacity) {
   return true;
 }
 
+/** Returns the size of one component of a WebGL pixel type in bytes. */
+static Uint32 gpu_component_size(GLenum type) {
+  switch (type) {
+  case GL_UNSIGNED_BYTE:
+  case GL_BYTE:
+    return 1;
+  case GL_UNSIGNED_SHORT:
+  case GL_SHORT:
+  case GL_HALF_FLOAT:
+  case GL_UNSIGNED_SHORT_5_6_5:
+    return 2;
+  default:
+    return 4;
+  }
+}
+
 /** Returns the bytes that an area of a texture takes in a transfer buffer. */
 static Uint64 gpu_transfer_size(const SDL_GPUTexture* texture,
                                 Uint32 pixels_per_row, Uint32 w, Uint32 h) {
   Uint32 texel = SDL_GPUTextureFormatTexelBlockSize(texture->sdl_format);
   Uint64 row   = (Uint64)(pixels_per_row ? pixels_per_row : w) * texel;
   return h == 0 ? 0 : (row * (h - 1)) + ((Uint64)w * texel);
+}
+
+/**
+ * Checks that an area of a texture fits in a transfer buffer. Emscripten
+ * reads 16-bit and 32-bit pixels at aligned addresses, so the offset must
+ * be aligned too. Sets the error if not.
+ */
+static bool gpu_check_transfer(const SDL_GPUTexture* texture,
+                               const SDL_GPUTextureTransferInfo* transfer,
+                               Uint32 w, Uint32 h) {
+  Uint32 alignment = gpu_component_size(texture->format->type);
+  if (transfer->offset % alignment != 0) {
+    return SDL_SetError("WebGL 2 GPU: for this format, the transfer offset "
+                        "must be a multiple of %u",
+                        (unsigned)alignment);
+  }
+  return gpu_fits(transfer->offset,
+                  gpu_transfer_size(texture, transfer->pixels_per_row, w, h),
+                  transfer->transfer_buffer->size);
 }
 
 void SDL_UploadToGPUTexture(SDL_GPUCopyPass* copy_pass,
@@ -2103,10 +2221,7 @@ void SDL_UploadToGPUTexture(SDL_GPUCopyPass* copy_pass,
   }
   SDL_GPUTexture* t           = destination->texture;
   SDL_GPUTransferBuffer* from = source->transfer_buffer;
-  if (!gpu_fits(source->offset,
-                gpu_transfer_size(t, source->pixels_per_row, destination->w,
-                                  destination->h),
-                from->size)) {
+  if (!gpu_check_transfer(t, source, destination->w, destination->h)) {
     return;
   }
   SDL_GPUDevice* device = copy_pass->command_buffer->device;
@@ -2167,6 +2282,10 @@ void SDL_CopyGPUTextureToTexture(SDL_GPUCopyPass* copy_pass,
     return;
   }
   SDL_GPUDevice* device = copy_pass->command_buffer->device;
+  if (gpu_is_depth(source->texture->format)) {
+    gpu_unsupported(device, GPU_FEATURE_DEPTH_READ);
+    return;
+  }
   glBindFramebuffer(GL_READ_FRAMEBUFFER, device->read_framebuffer);
   gpu_attach_read(source->texture, source->mip_level);
   gpu_bind_work_texture(device, destination->texture);
@@ -2184,6 +2303,11 @@ void SDL_CopyGPUBufferToBuffer(SDL_GPUCopyPass* copy_pass,
   if (!copy_pass || !source || !source->buffer || !destination ||
       !destination->buffer) {
     gpu_invalid(!copy_pass ? "copy_pass" : "source or destination");
+    return;
+  }
+  if (source->buffer->target != destination->buffer->target) {
+    SDL_SetError("WebGL 2 GPU: cannot copy between a buffer with index usage "
+                 "and one without. WebGL keeps index buffers apart.");
     return;
   }
   if (!gpu_fits(source->offset, size, source->buffer->size) ||
@@ -2207,13 +2331,14 @@ void SDL_DownloadFromGPUTexture(SDL_GPUCopyPass* copy_pass,
   }
   const SDL_GPUTexture* t   = source->texture;
   SDL_GPUTransferBuffer* to = destination->transfer_buffer;
-  if (!gpu_fits(destination->offset,
-                gpu_transfer_size(t, destination->pixels_per_row, source->w,
-                                  source->h),
-                to->size)) {
+  SDL_GPUDevice* device     = copy_pass->command_buffer->device;
+  if (gpu_is_depth(t->format)) {
+    gpu_unsupported(device, GPU_FEATURE_DEPTH_READ);
     return;
   }
-  SDL_GPUDevice* device = copy_pass->command_buffer->device;
+  if (!gpu_check_transfer(t, destination, source->w, source->h)) {
+    return;
+  }
   glBindFramebuffer(GL_READ_FRAMEBUFFER, device->read_framebuffer);
   gpu_attach_read(t, source->mip_level);
   glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)destination->pixels_per_row);

@@ -1,6 +1,11 @@
 // Tests the parts of the GPU layer (gpu.c) that the tests of pxl do not use:
-// the drivers, buffer downloads, copies, blits and the missing features. It
-// runs in the browser: rake pxl:playground:test.
+// the drivers, buffer downloads, copies, blits, uniform blocks without data
+// and the missing features. It runs in the browser: rake
+// pxl:playground:test.
+
+#define PXL_IMPLEMENTATION
+#include "pxl.h"
+#include "tests/pxl/test_shaders.h"
 
 #define PICO_UNIT_IMPLEMENTATION
 #include <SDL3/SDL.h>
@@ -200,12 +205,110 @@ TEST_CASE(test_missing_features) {
   return true;
 }
 
+// A shader with a uniform block draws when no data was pushed: WebGL needs a
+// buffer as large as the block.
+TEST_CASE(test_uniforms_without_push) {
+  pxl_context* pxl =
+      pxl_create(&(pxl_desc){.device = device, .width = 4, .height = 4});
+  REQUIRE(pxl != nullptr);
+  const pxl_color green = pxl_rgb(0x00ff00);
+  pxl_shader* shader    = pxl_create_shader(pxl, &slots_frag);
+  pxl_texture* extra    = pxl_create_texture(
+      pxl, &(pxl_texture_desc){.width = 1, .height = 1, .pixels = &green});
+  pxl_color pixels[16] = {};
+  REQUIRE(shader && extra);
+  pxl_begin_frame(pxl);
+  pxl_clear(pxl, pxl_black);
+  pxl_set_shader(pxl, shader);
+  pxl_set_shader_texture(pxl, 1, extra);
+  pxl_draw_rect(pxl, 0, 0, 4, 4, pxl_white);
+  REQUIRE(pxl_end_frame(pxl));
+  REQUIRE(pxl_read_texture(pxl, pxl_get_canvas(pxl), pixels));
+  REQUIRE(pixels[5].r == 0 && pixels[5].g == 255 && pixels[5].b == 0);
+  pxl_destroy_texture(pxl, extra);
+  pxl_destroy_shader(pxl, shader);
+  pxl_destroy(pxl);
+  return true;
+}
+
+/** Returns true if the SDL error contains `text`. */
+static bool error_has(const char* text) {
+  return SDL_strstr(SDL_GetError(), text) != nullptr;
+}
+
+// What WebGL cannot do sets the SDL error, instead of failing silently.
+TEST_CASE(test_transfer_errors) {
+  SDL_GPUTexture* depth = SDL_CreateGPUTexture(
+      device, &(SDL_GPUTextureCreateInfo){
+                  .format = SDL_GPU_TEXTUREFORMAT_D16_UNORM,
+                  .usage  = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+                  .width  = size,
+                  .height = size,
+                  .layer_count_or_depth = 1,
+                  .num_levels           = 1,
+              });
+  SDL_GPUTexture* floats = SDL_CreateGPUTexture(
+      device, &(SDL_GPUTextureCreateInfo){
+                  .format               = SDL_GPU_TEXTUREFORMAT_R32_FLOAT,
+                  .usage                = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                  .width                = size,
+                  .height               = size,
+                  .layer_count_or_depth = 1,
+                  .num_levels           = 1,
+              });
+  SDL_GPUBuffer* vertices = SDL_CreateGPUBuffer(
+      device, &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                         .size  = 16});
+  SDL_GPUBuffer* indices = SDL_CreateGPUBuffer(
+      device, &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_INDEX,
+                                         .size  = 16});
+  SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(
+      device, &(SDL_GPUTransferBufferCreateInfo){
+                  .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                  .size  = 256,
+              });
+  REQUIRE(depth && floats && vertices && indices && transfer);
+  SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device);
+  SDL_GPUCopyPass* copy     = SDL_BeginGPUCopyPass(cmd);
+
+  SDL_ClearError();
+  SDL_DownloadFromGPUTexture(
+      copy, &(SDL_GPUTextureRegion){.texture = depth, .w = 1, .h = 1, .d = 1},
+      &(SDL_GPUTextureTransferInfo){.transfer_buffer = transfer});
+  REQUIRE(error_has("depth"));
+
+  SDL_ClearError();
+  SDL_UploadToGPUTexture(
+      copy,
+      &(SDL_GPUTextureTransferInfo){.transfer_buffer = transfer, .offset = 2},
+      &(SDL_GPUTextureRegion){.texture = floats, .w = 1, .h = 1, .d = 1},
+      false);
+  REQUIRE(error_has("multiple of 4"));
+
+  SDL_ClearError();
+  SDL_CopyGPUBufferToBuffer(copy, &(SDL_GPUBufferLocation){.buffer = vertices},
+                            &(SDL_GPUBufferLocation){.buffer = indices}, 16,
+                            false);
+  REQUIRE(error_has("index usage"));
+
+  SDL_EndGPUCopyPass(copy);
+  REQUIRE(SDL_SubmitGPUCommandBuffer(cmd));
+  SDL_ReleaseGPUTransferBuffer(device, transfer);
+  SDL_ReleaseGPUBuffer(device, indices);
+  SDL_ReleaseGPUBuffer(device, vertices);
+  SDL_ReleaseGPUTexture(device, floats);
+  SDL_ReleaseGPUTexture(device, depth);
+  return true;
+}
+
 static void suite_gpu() {
   RUN_TEST_CASE(test_drivers);
   RUN_TEST_CASE(test_formats);
   RUN_TEST_CASE(test_buffer_round_trip);
   RUN_TEST_CASE(test_copy_and_blit);
   RUN_TEST_CASE(test_missing_features);
+  RUN_TEST_CASE(test_uniforms_without_push);
+  RUN_TEST_CASE(test_transfer_errors);
 }
 
 int main() {
@@ -213,7 +316,7 @@ int main() {
     printf("SDL_Init: %s\n", SDL_GetError());
     return 1;
   }
-  device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, false, nullptr);
+  device = SDL_CreateGPUDevice(pxl_shader_formats, false, nullptr);
   if (!device) {
     printf("SDL_CreateGPUDevice: %s\n", SDL_GetError());
     return 1;
