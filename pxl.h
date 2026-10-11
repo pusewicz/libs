@@ -2057,6 +2057,14 @@ constexpr size_t pxl__min_capacity   = 256;
 constexpr size_t pxl__min_buffer     = 16384;
 constexpr size_t pxl__uniform_align  = 16;
 constexpr int pxl__max_radius        = 1 << 14;
+/**
+ * A clip area that holds all targets. SDL_GetRectIntersection() rejects
+ * sizes from SDL_MAX_SINT32 / 2.
+ */
+constexpr SDL_Rect pxl__no_clip = {
+    .w = SDL_MAX_SINT32 / 4,
+    .h = SDL_MAX_SINT32 / 4,
+};
 /** Floats hold all whole numbers up to this. */
 constexpr float pxl__coordinate_limit = 16777216.0f;
 
@@ -2126,8 +2134,8 @@ typedef struct pxl__state {
   pxl_texture* textures[pxl_max_textures];
   size_t uniform_offset, uniform_size;
   pxl_font* font;
+  /** The area of the target that draws change. pxl__no_clip: all. */
   SDL_Rect clip;
-  bool clipped;
   bool snap;
   pxl_blend blend;
 } pxl__state;
@@ -2146,7 +2154,6 @@ typedef struct pxl__command {
   SDL_GPUTextureSamplerBinding bindings[pxl_max_textures];
   size_t num_bindings;
   SDL_Rect clip;
-  bool clipped;
   size_t uniform_offset, uniform_size;
   uint32_t first_index, index_count;
 } pxl__command;
@@ -3327,13 +3334,12 @@ void pxl_set_blend(pxl_context* ctx, pxl_blend blend) {
 
 void pxl_set_clip(pxl_context* ctx, int x, int y, int w, int h) {
   PXL_ASSERT(ctx);
-  ctx->state.clip    = (SDL_Rect){.x = x, .y = y, .w = w, .h = h};
-  ctx->state.clipped = true;
+  ctx->state.clip = (SDL_Rect){.x = x, .y = y, .w = w, .h = h};
 }
 
 void pxl_reset_clip(pxl_context* ctx) {
   PXL_ASSERT(ctx);
-  ctx->state.clipped = false;
+  ctx->state.clip = pxl__no_clip;
 }
 
 void pxl_set_snap(pxl_context* ctx, bool snap) {
@@ -3407,12 +3413,9 @@ static bool pxl__same_bindings(const pxl__command* a, const pxl__command* b,
 /** Returns true if two commands have the same state, except slot 0. */
 static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
   if (a->kind != b->kind || a->target != b->target || a->shader != b->shader ||
-      a->blend != b->blend || a->clipped != b->clipped ||
+      a->blend != b->blend || !SDL_RectsEqual(&a->clip, &b->clip) ||
       a->uniform_offset != b->uniform_offset ||
       a->uniform_size != b->uniform_size) {
-    return false;
-  }
-  if (a->clipped && !SDL_RectsEqual(&a->clip, &b->clip)) {
     return false;
   }
   return pxl__same_bindings(a, b, 1);
@@ -3453,7 +3456,6 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
       .blend          = s->blend,
       .num_bindings   = shader->num_textures,
       .clip           = s->clip,
-      .clipped        = s->clipped,
       .uniform_offset = s->uniform_offset,
       .uniform_size   = s->uniform_size,
       .first_index    = (uint32_t)ctx->index_count,
@@ -3541,8 +3543,7 @@ static bool pxl__append(pxl_context* ctx, const pxl_texture* texture,
   if (pxl__samples_target(ctx, texture)) {
     return pxl__fail(ctx, "a texture cannot be drawn into itself");
   }
-  if (ctx->state.clipped &&
-      (ctx->state.clip.w <= 0 || ctx->state.clip.h <= 0)) {
+  if (ctx->state.clip.w <= 0 || ctx->state.clip.h <= 0) {
     return false;
   }
   pxl__command* command = pxl__draw_command(ctx, texture);
@@ -4309,9 +4310,13 @@ pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
 
 void pxl_begin_frame(pxl_context* ctx) {
   PXL_ASSERT(ctx && !ctx->in_frame);
-  ctx->in_frame    = true;
-  ctx->failed      = false;
-  ctx->state       = (pxl__state){.transform = pxl_identity, .snap = true};
+  ctx->in_frame = true;
+  ctx->failed   = false;
+  ctx->state    = (pxl__state){
+      .transform = pxl_identity,
+      .clip      = pxl__no_clip,
+      .snap      = true,
+  };
   ctx->stack_depth = 0;
   if (!pxl__update_canvas(ctx)) {
     pxl__fail_sdl(ctx);
@@ -4385,9 +4390,9 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
                              pxl__pass pass[static 1], const pxl__command* c) {
   int w            = c->target->width;
   int h            = c->target->height;
-  SDL_Rect scissor = {.w = w, .h = h};
-  if (c->clipped && !SDL_GetRectIntersection(
-                        &c->clip, &(SDL_Rect){.w = w, .h = h}, &scissor)) {
+  SDL_Rect scissor = {};
+  if (!SDL_GetRectIntersection(&c->clip, &(SDL_Rect){.w = w, .h = h},
+                               &scissor)) {
     return;
   }
   SDL_GPUGraphicsPipeline* pipeline =
@@ -4402,8 +4407,7 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
     pass->pipeline = pipeline;
     last           = nullptr;
   }
-  if (!last || last->clipped != c->clipped ||
-      (c->clipped && !SDL_RectsEqual(&last->clip, &c->clip))) {
+  if (!last || !SDL_RectsEqual(&last->clip, &c->clip)) {
     SDL_SetGPUScissor(pass->handle, &scissor);
   }
   if (c->num_bindings > 0 && (!last || !pxl__same_bindings(last, c, 0))) {
@@ -4511,7 +4515,11 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
 
 /** Appends the commands that show the canvas in the screen. */
 static void pxl__show_canvas(pxl_context* ctx) {
-  ctx->state = (pxl__state){.transform = pxl_identity, .target = &ctx->screen};
+  ctx->state = (pxl__state){
+      .transform = pxl_identity,
+      .target    = &ctx->screen,
+      .clip      = pxl__no_clip,
+  };
   pxl_clear(ctx, ctx->letterbox);
   const pxl_rect* r  = &ctx->viewport;
   const pxl_vec2 p[] = {
