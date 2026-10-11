@@ -2054,6 +2054,7 @@ static const uint8_t pxl__font_advances[95] = {
 
 constexpr size_t pxl__stack_capacity = 32;
 constexpr size_t pxl__min_capacity   = 256;
+constexpr size_t pxl__min_buffer     = 16384;
 constexpr size_t pxl__uniform_align  = 16;
 constexpr int pxl__max_radius        = 1 << 14;
 /** Floats hold all whole numbers up to this. */
@@ -2198,6 +2199,23 @@ struct pxl_context {
 // Memory
 
 /**
+ * Doubles a capacity until it holds `needed`. A zero capacity starts at
+ * `minimum`.
+ *
+ * @return false if the capacity overflows.
+ */
+static bool pxl__double(size_t capacity, size_t minimum, size_t needed,
+                        size_t out[static 1]) {
+  *out = capacity ? capacity : minimum;
+  while (*out < needed) {
+    if (ckd_mul(out, *out, 2)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Grows an array to hold at least `needed` items.
  *
  * @return The new array, or nullptr. On success, *capacity is the new
@@ -2208,11 +2226,9 @@ struct pxl_context {
   if (needed <= *capacity) {
     return data;
   }
-  size_t count = *capacity ? *capacity : pxl__min_capacity;
-  while (count < needed) {
-    if (ckd_mul(&count, count, 2)) {
-      return nullptr;
-    }
+  size_t count = 0;
+  if (!pxl__double(*capacity, pxl__min_capacity, needed, &count)) {
+    return nullptr;
   }
   size_t bytes = 0;
   if (ckd_mul(&bytes, count, item_size)) {
@@ -2550,13 +2566,9 @@ static bool pxl__reserve_buffer(pxl_context* ctx, SDL_GPUBuffer** buffer,
   if (size <= *capacity) {
     return true;
   }
-  size_t grown = pxl__min_capacity * sizeof(pxl__vertex);
-  while (grown < size) {
-    if (ckd_mul(&grown, grown, 2)) {
-      return SDL_SetError("pxl: buffer too large");
-    }
-  }
-  if (grown > UINT32_MAX) {
+  size_t grown = 0;
+  if (!pxl__double(*capacity, pxl__min_buffer, size, &grown) ||
+      grown > UINT32_MAX) {
     return SDL_SetError("pxl: buffer too large");
   }
   SDL_GPUBuffer* created = SDL_CreateGPUBuffer(
@@ -2576,14 +2588,9 @@ static bool pxl__reserve_transfer(pxl_context* ctx, size_t size) {
   if (size <= ctx->transfer_buffer_size) {
     return true;
   }
-  size_t grown = ctx->transfer_buffer_size ? ctx->transfer_buffer_size
-                                           : pxl__min_capacity * 64;
-  while (grown < size) {
-    if (ckd_mul(&grown, grown, 2)) {
-      return SDL_SetError("pxl: buffer too large");
-    }
-  }
-  if (grown > UINT32_MAX) {
+  size_t grown = 0;
+  if (!pxl__double(ctx->transfer_buffer_size, pxl__min_buffer, size, &grown) ||
+      grown > UINT32_MAX) {
     return SDL_SetError("pxl: buffer too large");
   }
   SDL_GPUTransferBuffer* created = SDL_CreateGPUTransferBuffer(
