@@ -2105,8 +2105,10 @@ struct pxl_font {
   int line_height;
   uint32_t first;
   size_t count;
-  /** count advances, or nullptr for glyph_width. */
-  uint8_t* advances;
+  /** false: each glyph advances by glyph_width. */
+  bool has_advances;
+  /** count advances, if has_advances. */
+  uint8_t advances[];
 };
 
 typedef struct pxl__pipeline {
@@ -4060,7 +4062,12 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
     SDL_SetError("pxl: the font texture is too small");
     return nullptr;
   }
-  pxl_font* font = PXL_MALLOC(sizeof *font);
+  size_t size = sizeof(pxl_font);
+  if (desc->advances && ckd_add(&size, size, count)) {
+    SDL_SetError("pxl: too many glyphs");
+    return nullptr;
+  }
+  pxl_font* font = PXL_MALLOC(size);
   if (!font) {
     SDL_OutOfMemory();
     return nullptr;
@@ -4072,16 +4079,11 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
       .columns      = columns,
       .line_height =
           desc->line_height > 0 ? desc->line_height : desc->glyph_height,
-      .first = desc->first ? desc->first : ' ',
-      .count = count,
+      .first        = desc->first ? desc->first : ' ',
+      .count        = count,
+      .has_advances = desc->advances != nullptr,
   };
   if (desc->advances) {
-    font->advances = PXL_MALLOC(count);
-    if (!font->advances) {
-      PXL_FREE(font);
-      SDL_OutOfMemory();
-      return nullptr;
-    }
     memcpy(font->advances, desc->advances, count);
   }
   return font;
@@ -4094,7 +4096,6 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
   }
   PXL_ASSERT(font != ctx->default_font);
   pxl__forget(ctx, font);
-  PXL_FREE(font->advances);
   PXL_FREE(font);
 }
 
@@ -4103,7 +4104,6 @@ static void pxl__free_default_font(pxl_context* ctx) {
   pxl_font* font = ctx->default_font;
   if (font) {
     pxl__free_texture(ctx, font->texture);
-    PXL_FREE(font->advances);
     PXL_FREE(font);
     ctx->default_font = nullptr;
   }
@@ -4231,7 +4231,8 @@ static int64_t pxl__glyph(const pxl_font* font, uint32_t code_point) {
 }
 
 static float pxl__advance(const pxl_font* font, int64_t glyph) {
-  return (float)(font->advances ? font->advances[glyph] : font->glyph_width);
+  return (float)(font->has_advances ? font->advances[glyph]
+                                    : font->glyph_width);
 }
 
 static const pxl_font* pxl__font(const pxl_context* ctx) {
