@@ -3074,7 +3074,6 @@ static bool pxl__update_canvas(pxl_context* ctx) {
     return false;
   }
   if (ctx->canvas) {
-    pxl__forget_texture(&ctx->state, ctx->canvas);
     pxl__free_texture(ctx, ctx->canvas);
   }
   ctx->canvas = canvas;
