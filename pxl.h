@@ -2189,7 +2189,7 @@ static pxl_rect pxl__fit(int canvas_w, int canvas_h, int window_w, int window_h,
   };
 }
 
-/** Returns true if each canvas pixel covers the same whole window pixels. */
+/** Returns true if each canvas pixel covers a square of whole window pixels. */
 static bool pxl__is_exact(pxl_rect viewport, int canvas_w, int canvas_h) {
   float scale_x = viewport.w / (float)canvas_w;
   float scale_y = viewport.h / (float)canvas_h;
@@ -3296,7 +3296,7 @@ static pxl__vertex* pxl__reserve(pxl_context* ctx, size_t count) {
   return reserved;
 }
 
-/** Returns true if a draw with a texture samples its own target. */
+/** Returns true if a draw samples its target in slot 0 or a shader slot. */
 static bool pxl__samples_target(const pxl_context* ctx,
                                 const pxl_texture* texture) {
   const pxl_texture* target = pxl__target(ctx);
