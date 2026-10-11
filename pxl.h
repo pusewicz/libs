@@ -3091,10 +3091,9 @@ static bool pxl__update_viewport(pxl_context* ctx, int window_w, int window_h) {
   bool exact    = false;
   ctx->viewport = pxl__fit(ctx->canvas->width, ctx->canvas->height, window_w,
                            window_h, ctx->scale_mode, &exact);
-  int w         = 0;
-  int h         = 0;
-  if (ctx->window && SDL_GetWindowSize(ctx->window, &w, &h) && w > 0) {
-    ctx->pixel_density = (float)window_w / (float)w;
+  float density = ctx->window ? SDL_GetWindowPixelDensity(ctx->window) : 0.0f;
+  if (density > 0.0f) {
+    ctx->pixel_density = density;
   }
   return exact;
 }
