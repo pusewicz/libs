@@ -1,0 +1,88 @@
+# Builds the pxl playground, tests it in headless Chromium and publishes it on
+# GitHub Pages. Pull requests only build and test it.
+#
+# Pages must use "GitHub Actions" as the source: Settings > Pages > Source.
+name: Pages
+
+on:
+  pull_request:
+    paths:
+      - pxl.h
+      - compile_flags.txt
+      - Rakefile
+      - rakelib/pxl.rake
+      - examples/pxl/**
+      - tests/pxl/**
+      - playground/**
+      - .github/workflows/pages.yml
+  push:
+    branches: [main]
+    paths:
+      - pxl.h
+      - compile_flags.txt
+      - Rakefile
+      - rakelib/pxl.rake
+      - examples/pxl/**
+      - tests/pxl/**
+      - playground/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The version that the playground is tested with.
+  EMSDK_VERSION: 6.0.12
+
+jobs:
+  build:
+    name: Build and test
+    # Playwright supports Ubuntu 24.04 for its browser dependencies.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playground/pxl/package-lock.json
+      - name: Install Emscripten
+        run: |
+          emsdk="$RUNNER_TEMP/emsdk"
+          git clone --quiet --depth 1 --branch "$EMSDK_VERSION" \
+            https://github.com/emscripten-core/emsdk.git "$emsdk"
+          "$emsdk/emsdk" install "$EMSDK_VERSION"
+          "$emsdk/emsdk" activate "$EMSDK_VERSION"
+          echo "$emsdk/upstream/emscripten" >> "$GITHUB_PATH"
+      - run: rake pxl:playground
+      - name: Install Chromium
+        working-directory: playground/pxl
+        run: npx playwright install --with-deps chromium
+      - run: rake pxl:playground:test
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: build/playground/site
+
+  deploy:
+    name: Deploy
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}pxl/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
