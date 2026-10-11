@@ -4183,23 +4183,54 @@ static const pxl_font* pxl__font(const pxl_context* ctx) {
   return ctx->state.font ? ctx->state.font : ctx->default_font;
 }
 
+/** Lays out UTF-8 text, one glyph at a time. */
+typedef struct pxl__layout {
+  const pxl_font* font;
+  const char* text;
+  /** The bytes of text that are left. */
+  size_t length;
+  /** The x of the start of each line, and the position of the next glyph. */
+  float left, x, y;
+} pxl__layout;
+
+/**
+ * Gets the next glyph of the text. Skips code points that have no glyph.
+ * '\n' moves the position to the start of the next line.
+ *
+ * @param code_point Set to the code point of the glyph.
+ * @return The glyph, or -1 at the end of the text.
+ */
+static int64_t pxl__next_glyph(pxl__layout* layout,
+                               uint32_t code_point[static 1]) {
+  while ((*code_point = SDL_StepUTF8(&layout->text, &layout->length)) != 0) {
+    if (*code_point == '\n') {
+      layout->x = layout->left;
+      layout->y += (float)layout->font->line_height;
+      continue;
+    }
+    int64_t glyph = pxl__glyph(layout->font, *code_point);
+    if (glyph >= 0) {
+      return glyph;
+    }
+  }
+  return -1;
+}
+
 /** Draws `length` bytes of UTF-8 text. */
 static void pxl__draw_string(pxl_context* ctx, float x, float y,
                              pxl_color color, const char* text, size_t length) {
   const pxl_font* font = pxl__font(ctx);
-  float pen_x          = x;
-  float pen_y          = y;
-  uint32_t code_point  = 0;
-  while ((code_point = SDL_StepUTF8(&text, &length)) != 0) {
-    if (code_point == '\n') {
-      pen_x = x;
-      pen_y += (float)font->line_height;
-      continue;
-    }
-    int64_t glyph = pxl__glyph(font, code_point);
-    if (glyph < 0) {
-      continue;
-    }
+  pxl__layout layout   = {
+      .font   = font,
+      .text   = text,
+      .length = length,
+      .left   = x,
+      .x      = x,
+      .y      = y,
+  };
+  uint32_t code_point = 0;
+  int64_t glyph       = 0;
+  while ((glyph = pxl__next_glyph(&layout, &code_point)) >= 0) {
     if (code_point != ' ') {
       int64_t column     = glyph % font->columns;
       int64_t row        = glyph / font->columns;
@@ -4209,10 +4240,10 @@ static void pxl__draw_string(pxl_context* ctx, float x, float y,
           .w = (float)font->glyph_width,
           .h = (float)font->glyph_height,
       };
-      pxl__draw_region(ctx, font->texture, &ctx->state.transform, src, pen_x,
-                       pen_y, color, pxl_transparent);
+      pxl__draw_region(ctx, font->texture, &ctx->state.transform, src, layout.x,
+                       layout.y, color, pxl_transparent);
     }
-    pen_x += pxl__advance(font, glyph);
+    layout.x += pxl__advance(font, glyph);
   }
 }
 
@@ -4247,30 +4278,19 @@ pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
     return (pxl_vec2){};
   }
   const pxl_font* font = pxl__font(ctx);
+  pxl__layout layout   = {.font = font, .text = text, .length = length};
   float width          = 0.0f;
-  float line           = 0.0f;
-  size_t lines         = *text ? 1 : 0;
-  const char* s        = text;
   uint32_t code_point  = 0;
-  while ((code_point = SDL_StepUTF8(&s, &length)) != 0) {
-    if (code_point == '\n') {
-      line = 0.0f;
-      lines++;
-      continue;
-    }
-    int64_t glyph = pxl__glyph(font, code_point);
-    if (glyph >= 0) {
-      line += pxl__advance(font, glyph);
-      width = fmaxf(width, line);
-    }
+  int64_t glyph        = 0;
+  while ((glyph = pxl__next_glyph(&layout, &code_point)) >= 0) {
+    layout.x += pxl__advance(font, glyph);
+    width = fmaxf(width, layout.x);
   }
+  float height = *text ? layout.y + (float)font->line_height : 0.0f;
   if (text != buffer) {
     PXL_FREE(text);
   }
-  return (pxl_vec2){
-      .x = width,
-      .y = (float)lines * (float)font->line_height,
-  };
+  return (pxl_vec2){.x = width, .y = height};
 }
 
 // ---------------------------------------------------------------------------
