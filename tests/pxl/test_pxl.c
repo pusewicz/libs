@@ -88,6 +88,17 @@ TEST_CASE(test_fit) {
   return true;
 }
 
+TEST_CASE(test_fail) {
+  static pxl_context ctx = {};
+  SDL_SetError("the GPU failed");
+  REQUIRE(!pxl__fail_sdl(&ctx));
+  REQUIRE(ctx.failed);
+  REQUIRE(strcmp(SDL_GetError(), "the GPU failed") == 0);
+  REQUIRE(!pxl__fail(&ctx, "out of memory"));
+  REQUIRE(strcmp(SDL_GetError(), "pxl: out of memory") == 0);
+  return true;
+}
+
 TEST_CASE(test_circle_spans) {
   REQUIRE(pxl__circle_span(0, 0) == 0);
   REQUIRE(pxl__circle_span(0, 1) == -1);
@@ -865,6 +876,7 @@ static TEST_SUITE(suite_cpu) {
   RUN_TEST_CASE(test_colors);
   RUN_TEST_CASE(test_transforms);
   RUN_TEST_CASE(test_fit);
+  RUN_TEST_CASE(test_fail);
   RUN_TEST_CASE(test_circle_spans);
 }
 

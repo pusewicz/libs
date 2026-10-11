@@ -2225,11 +2225,16 @@ struct pxl_context {
   return grown;
 }
 
-/** Marks the frame as failed. Returns false. */
-static bool pxl__fail(pxl_context* ctx, const char* message) {
+/** Marks the frame as failed after an SDL function failed. Returns false. */
+static bool pxl__fail_sdl(pxl_context* ctx) {
   ctx->failed = true;
-  SDL_SetError("pxl: %s", message);
   return false;
+}
+
+/** Marks the frame as failed with an error of pxl. Returns false. */
+static bool pxl__fail(pxl_context* ctx, const char* message) {
+  SDL_SetError("pxl: %s", message);
+  return pxl__fail_sdl(ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -4338,7 +4343,7 @@ void pxl_begin_frame(pxl_context* ctx) {
   ctx->state       = (pxl__state){.transform = pxl_identity, .snap = true};
   ctx->stack_depth = 0;
   if (!pxl__update_canvas(ctx)) {
-    pxl__fail(ctx, SDL_GetError());
+    pxl__fail_sdl(ctx);
   }
   int w = 0;
   int h = 0;
@@ -4363,7 +4368,7 @@ static SDL_GPURenderPass* pxl__begin_pass(pxl_context* ctx,
       },
       1, nullptr);
   if (!pass) {
-    pxl__fail(ctx, SDL_GetError());
+    pxl__fail_sdl(ctx);
     return nullptr;
   }
   if (ctx->vertex_buffer) {
@@ -4427,7 +4432,7 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
   SDL_GPUGraphicsPipeline* pipeline = pxl__get_pipeline(
       ctx, c->shader->handle, c->blend, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   if (!pipeline) {
-    pxl__fail(ctx, SDL_GetError());
+    pxl__fail_sdl(ctx);
     return;
   }
   const pxl__command* last = pass->last;
@@ -4502,12 +4507,12 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
       !pxl__reserve_buffer(ctx, &ctx->index_buffer, &ctx->index_buffer_size,
                            index_bytes, SDL_GPU_BUFFERUSAGE_INDEX) ||
       !pxl__reserve_transfer(ctx, total)) {
-    return pxl__fail(ctx, SDL_GetError());
+    return pxl__fail_sdl(ctx);
   }
   uint8_t* mapped =
       SDL_MapGPUTransferBuffer(ctx->device, ctx->transfer_buffer, true);
   if (!mapped) {
-    return pxl__fail(ctx, SDL_GetError());
+    return pxl__fail_sdl(ctx);
   }
   memcpy(mapped, ctx->vertices, vertex_bytes);
   memcpy(mapped + vertex_bytes, ctx->indices, index_bytes);
@@ -4587,7 +4592,7 @@ static void pxl__render_canvas(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
   SDL_GPUGraphicsPipeline* pipeline = pxl__get_pipeline(
       ctx, ctx->default_shader->handle, PXL_BLEND_ALPHA, format);
   if (!pipeline) {
-    pxl__fail(ctx, SDL_GetError());
+    pxl__fail_sdl(ctx);
   } else if (first_index >= 0) {
     pxl__bind_pipeline(cmd, pass, pipeline, w, h);
     SDL_SetGPUScissor(pass, &(SDL_Rect){.w = w, .h = h});
@@ -4655,7 +4660,7 @@ bool pxl_end_frame(pxl_context* ctx) {
   Uint32 h                  = 0;
   if (!cmd || (ctx->window && !SDL_WaitAndAcquireGPUSwapchainTexture(
                                   cmd, ctx->window, &swapchain, &w, &h))) {
-    pxl__fail(ctx, SDL_GetError());
+    pxl__fail_sdl(ctx);
     if (cmd) {
       SDL_CancelGPUCommandBuffer(cmd);
     }
@@ -4667,7 +4672,7 @@ bool pxl_end_frame(pxl_context* ctx) {
                 : SDL_GPU_TEXTUREFORMAT_INVALID;
   bool ok = pxl_end_frame_into(ctx, cmd, swapchain, format, (int)w, (int)h);
   if (!SDL_SubmitGPUCommandBuffer(cmd)) {
-    ok = pxl__fail(ctx, SDL_GetError());
+    ok = pxl__fail_sdl(ctx);
   }
   return ok;
 }
