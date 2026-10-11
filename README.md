@@ -51,8 +51,10 @@ pxl.h needs a C23 compiler. It is tested with clang 19 to 23 and gcc 15 and
 
 ## Development
 
-Install Ruby, clang 19 or gcc 15 or newer, clang-format, clang-tidy,
-pkg-config and SDL3. Then run `rake check`. `rake test` uses the compiler in
+Run `bin/setup` to install the tools and packages that CI uses. It supports
+Debian or Ubuntu, macOS and MSYS2. Or install Ruby, clang 19 or gcc 15 or
+newer, clang-format, clang-tidy, pkg-config and SDL3 yourself. Then run
+`rake check`. `rake test` uses the compiler in
 `CC`, or `cc`.
 
 CI runs the checks on each pull request: on Linux with gcc and clang, on
