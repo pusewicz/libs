@@ -48,7 +48,7 @@ module Pxl
   end
 end
 
-%w[glslc spirv-cross spirv-val].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
+%w[glslc spirv-cross spirv-opt spirv-val].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
 BANNER_ROWS["DXC"] = -> { Pxl.describe_dxc }
 
 namespace :pxl do

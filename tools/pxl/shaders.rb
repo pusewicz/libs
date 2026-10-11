@@ -10,10 +10,10 @@
 #
 #   pxl_shader* wave = pxl_create_shader(pxl, &wave_frag);
 #
-# It needs glslc, spirv-val and spirv-cross in PATH, and dxc in PATH or in
-# $DXC. If there is no dxc, it downloads the DXC release for Linux x86_64.
-# It runs the release directly on Linux x86_64, and in Docker on macOS,
-# because Microsoft has no DXC for macOS.
+# It needs glslc, spirv-cross, spirv-opt and spirv-val in PATH, and dxc in
+# PATH or in $DXC. If there is no dxc, it downloads the DXC release for Linux
+# x86_64. It runs the release directly on Linux x86_64, and in Docker on
+# macOS, because Microsoft has no DXC for macOS.
 
 require "digest"
 require "fileutils"
@@ -150,8 +150,12 @@ module PxlShaders
     run("spirv-cross", spirv, "--hlsl", "--shader-model", "60", "--output", "#{base}.hlsl")
     run(*dxc, "-T", "#{stage}_6_0", "-E", "main", "-Qstrip_debug", "-Qstrip_reflect",
         "-Fo", "#{base}.dxil", "#{base}.hlsl")
+    # spirv-cross uses the debug names. The GPU does not need them.
+    stripped = "#{base}.stripped.spv"
+    run("spirv-opt", "--strip-debug", spirv, "-o", stripped)
+    run("spirv-val", stripped)
     {
-      spirv: File.binread(spirv),
+      spirv: File.binread(stripped),
       msl: File.binread("#{base}.msl"),
       dxil: File.binread("#{base}.dxil"),
       **counts,
