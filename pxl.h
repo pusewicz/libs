@@ -2895,13 +2895,19 @@ static bool pxl__update_canvas(pxl_context* ctx) {
   return true;
 }
 
-/** Updates the viewport from the size of the window in pixels. */
-static void pxl__update_viewport(pxl_context* ctx, int window_w, int window_h) {
-  ctx->viewport = pxl__fit(ctx->canvas->width, ctx->canvas->height, window_w,
-                           window_h, ctx->scale_mode);
-  float density = ctx->window ? SDL_GetWindowPixelDensity(ctx->window) : 0.0f;
-  if (density > 0.0f) {
-    ctx->pixel_density = density;
+/**
+ * Updates the viewport for a target that fills the window. The pixel
+ * density maps window coordinates to target pixels.
+ *
+ * @param target_w, target_h The size of the target in pixels.
+ */
+static void pxl__update_viewport(pxl_context* ctx, int target_w, int target_h) {
+  ctx->viewport = pxl__fit(ctx->canvas->width, ctx->canvas->height, target_w,
+                           target_h, ctx->scale_mode);
+  int w         = 0;
+  int h         = 0;
+  if (ctx->window && SDL_GetWindowSize(ctx->window, &w, &h) && w > 0) {
+    ctx->pixel_density = (float)target_w / (float)w;
   }
 }
 
