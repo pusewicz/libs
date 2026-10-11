@@ -3667,6 +3667,38 @@ static pxl_rect pxl__source(const pxl_texture* texture, pxl_rect src) {
   return src;
 }
 
+/** Gets the texture area u0, v0, u1, v1 of the texels (x0, y0) to (x1, y1). */
+static void pxl__uv(const pxl_texture* texture, float x0, float y0, float x1,
+                    float y1, float uv[static 4]) {
+  float w = (float)texture->width;
+  float h = (float)texture->height;
+  uv[0]   = x0 / w;
+  uv[1]   = y0 / h;
+  uv[2]   = x1 / w;
+  uv[3]   = y1 / h;
+}
+
+/**
+ * Draws an area of a texture. Snaps the quad if snap is on.
+ *
+ * @param t The transform of the texels.
+ * @param x, y The position of the top-left texel before the transform.
+ */
+static void pxl__draw_region(pxl_context* ctx, const pxl_texture* texture,
+                             const pxl_transform* t, pxl_rect src, float x,
+                             float y, pxl_color color, pxl_color overlay) {
+  pxl_vec2 p[] = {
+      pxl__apply(t, x, y),
+      pxl__apply(t, x + src.w, y),
+      pxl__apply(t, x + src.w, y + src.h),
+      pxl__apply(t, x, y + src.h),
+  };
+  pxl__snap_quad(ctx, p);
+  float uv[4] = {};
+  pxl__uv(texture, src.x, src.y, src.x + src.w, src.y + src.h, uv);
+  pxl__quad(ctx, texture, p, uv, color, overlay);
+}
+
 void pxl_draw_sprite(pxl_context* ctx, pxl_texture* texture,
                      const pxl_sprite* sprite) {
   PXL_ASSERT(ctx && texture && sprite);
@@ -3696,31 +3728,14 @@ void pxl_draw_sprite(pxl_context* ctx, pxl_texture* texture,
           sprite->y - (s * sx * sprite->origin.x) - (c * sy * sprite->origin.y),
   };
   const pxl_transform t = pxl__multiply(&ctx->state.transform, &local);
-  pxl_vec2 p[]          = {
-      pxl__apply(&t, 0.0f, 0.0f),
-      pxl__apply(&t, src.w, 0.0f),
-      pxl__apply(&t, src.w, src.h),
-      pxl__apply(&t, 0.0f, src.h),
-  };
-  pxl__snap_quad(ctx, p);
-  float tw         = (float)texture->width;
-  float th         = (float)texture->height;
-  const float uv[] = {
-      src.x / tw,
-      src.y / th,
-      (src.x + src.w) / tw,
-      (src.y + src.h) / th,
-  };
   pxl_color color = pxl__is_zero(sprite->color) ? pxl_white : sprite->color;
-  pxl__quad(ctx, texture, p, uv, color, sprite->overlay);
+  pxl__draw_region(ctx, texture, &t, src, 0.0f, 0.0f, color, sprite->overlay);
 }
 
 void pxl_draw_nine_slice(pxl_context* ctx, pxl_texture* texture,
                          const pxl_nine_slice* slice) {
   PXL_ASSERT(ctx && texture && slice);
   pxl_rect src     = pxl__source(texture, slice->src);
-  float tw         = (float)texture->width;
-  float th         = (float)texture->height;
   const float sx[] = {
       src.x,
       src.x + slice->left,
@@ -3757,12 +3772,8 @@ void pxl_draw_nine_slice(pxl_context* ctx, pxl_texture* texture,
           pxl__vertex_position(ctx, dx[i + 1], dy[j + 1]),
           pxl__vertex_position(ctx, dx[i], dy[j + 1]),
       };
-      const float uv[] = {
-          sx[i] / tw,
-          sy[j] / th,
-          sx[i + 1] / tw,
-          sy[j + 1] / th,
-      };
+      float uv[4] = {};
+      pxl__uv(texture, sx[i], sy[j], sx[i + 1], sy[j + 1], uv);
       pxl__quad(ctx, texture, p, uv, color, pxl_transparent);
     }
   }
@@ -4236,28 +4247,6 @@ static const pxl_font* pxl__font(const pxl_context* ctx) {
   return ctx->state.font ? ctx->state.font : ctx->default_font;
 }
 
-/** Draws an area of a texture with its top-left corner at (x, y). */
-static void pxl__draw_region(pxl_context* ctx, const pxl_texture* texture,
-                             pxl_rect src, float x, float y, pxl_color color) {
-  const pxl_transform* t = &ctx->state.transform;
-  pxl_vec2 p[]           = {
-      pxl__apply(t, x, y),
-      pxl__apply(t, x + src.w, y),
-      pxl__apply(t, x + src.w, y + src.h),
-      pxl__apply(t, x, y + src.h),
-  };
-  pxl__snap_quad(ctx, p);
-  float tw         = (float)texture->width;
-  float th         = (float)texture->height;
-  const float uv[] = {
-      src.x / tw,
-      src.y / th,
-      (src.x + src.w) / tw,
-      (src.y + src.h) / th,
-  };
-  pxl__quad(ctx, texture, p, uv, color, pxl_transparent);
-}
-
 static void pxl__draw_string(pxl_context* ctx, float x, float y,
                              pxl_color color, const char* text) {
   const pxl_font* font = pxl__font(ctx);
@@ -4283,7 +4272,8 @@ static void pxl__draw_string(pxl_context* ctx, float x, float y,
           .w = (float)font->glyph_width,
           .h = (float)font->glyph_height,
       };
-      pxl__draw_region(ctx, font->texture, src, pen_x, pen_y, color);
+      pxl__draw_region(ctx, font->texture, &ctx->state.transform, src, pen_x,
+                       pen_y, color, pxl_transparent);
     }
     pen_x += pxl__advance(font, glyph);
   }
