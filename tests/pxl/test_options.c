@@ -1,14 +1,15 @@
 // Tests the pxl.h options: a custom allocator and a custom assert. It also
-// makes each allocation fail in turn. The tests need a GPU device; without
-// one they are skipped.
+// makes each allocation fail in turn, and calls functions where pxl asserts.
+// The tests need a GPU device; without one they are skipped.
 
 #include <stdio.h>
 #include <stdlib.h>
 
-static size_t calls        = 0;
-static size_t failing_call = 0;
-static long blocks         = 0;
-static size_t asserts      = 0;
+static size_t calls          = 0;
+static size_t failing_call   = 0;
+static long blocks           = 0;
+static size_t asserts        = 0;
+static size_t failed_asserts = 0;
 
 // Counts allocations. It fails the call that the test selects.
 static void* counting_malloc(size_t size) {
@@ -36,12 +37,11 @@ static void counting_free(void* pointer) {
   free(pointer);
 }
 
-// Counts asserts.
+// Counts asserts and the asserts that fail. It does not stop the program, so
+// the tests can check what pxl does after a failed assert.
 static void counting_assert(bool condition) {
   asserts++;
-  if (!condition) {
-    abort();
-  }
+  failed_asserts += !condition;
 }
 
 #define PXL_MALLOC(size) counting_malloc(size)
@@ -93,14 +93,16 @@ static bool run_frame() {
 }
 
 TEST_CASE(test_custom_allocator_and_assert) {
-  calls        = 0;
-  failing_call = 0;
-  blocks       = 0;
-  asserts      = 0;
+  calls          = 0;
+  failing_call   = 0;
+  blocks         = 0;
+  asserts        = 0;
+  failed_asserts = 0;
   REQUIRE(run_frame());
   REQUIRE(calls > 0);
   REQUIRE(blocks == 0);
   REQUIRE(asserts > 0);
+  REQUIRE(failed_asserts == 0);
   return true;
 }
 
@@ -110,18 +112,50 @@ TEST_CASE(test_allocation_failures) {
   REQUIRE(run_frame());
   size_t needed = calls;
   for (size_t call = 1; call <= needed; ++call) {
-    calls        = 0;
-    failing_call = call;
-    blocks       = 0;
+    calls          = 0;
+    failing_call   = call;
+    blocks         = 0;
+    failed_asserts = 0;
     REQUIRE(!run_frame());
     REQUIRE(blocks == 0);
+    REQUIRE(failed_asserts == 0);
   }
+  return true;
+}
+
+// Commands outside of a frame fail. They do not change the next frame.
+TEST_CASE(test_outside_of_a_frame) {
+  failing_call     = 0;
+  failed_asserts   = 0;
+  pxl_context* pxl = pxl_create(&(pxl_desc){
+      .device = device,
+      .width  = 1,
+      .height = 1,
+  });
+  REQUIRE(pxl != nullptr);
+  pxl_begin_frame(pxl);
+  pxl_clear(pxl, pxl_black);
+  bool ended              = pxl_end_frame(pxl);
+  const float uniforms[4] = {};
+  bool set                = pxl_set_uniforms(pxl, uniforms, sizeof uniforms);
+  pxl_clear(pxl, pxl_white);
+  pxl_draw_rect(pxl, 0, 0, 1, 1, pxl_white);
+  size_t failed_outside = failed_asserts;
+  pxl_begin_frame(pxl);
+  ended           = pxl_end_frame(pxl) && ended;
+  pxl_color pixel = {};
+  bool read       = pxl_read_texture(pxl, pxl_get_canvas(pxl), &pixel);
+  pxl_destroy(pxl);
+  REQUIRE(ended && read && !set);
+  REQUIRE(failed_outside == 3 && failed_asserts == 3);
+  REQUIRE(pixel.r == 0 && pixel.a == 255);
   return true;
 }
 
 static TEST_SUITE(suite_options) {
   RUN_TEST_CASE(test_custom_allocator_and_assert);
   RUN_TEST_CASE(test_allocation_failures);
+  RUN_TEST_CASE(test_outside_of_a_frame);
 }
 
 int main() {

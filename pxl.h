@@ -3353,6 +3353,9 @@ void pxl_set_shader_texture(pxl_context* ctx, size_t slot,
 
 bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size) {
   PXL_ASSERT(ctx && ctx->in_frame);
+  if (!ctx->in_frame) {
+    return pxl__fail(ctx, "uniforms outside of a frame");
+  }
   if (!data || size == 0) {
     ctx->state.uniform_offset = 0;
     ctx->state.uniform_size   = 0;
@@ -3611,6 +3614,10 @@ static pxl_vec2 pxl__vertex_position(const pxl_context* ctx, float x, float y) {
 
 void pxl_clear(pxl_context* ctx, pxl_color color) {
   PXL_ASSERT(ctx && ctx->in_frame);
+  if (!ctx->in_frame) {
+    pxl__fail(ctx, "clear outside of a frame");
+    return;
+  }
   pxl__command* commands =
       pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
                 &ctx->command_capacity);
