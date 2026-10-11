@@ -1453,6 +1453,15 @@ static const uint8_t pxl__sprite_frag_dxil[] = {
   0x30, 0x40, 0x46, 0xc2, 0x1c, 0xf8, 0x81, 0x1f, 0xda, 0xa1, 0x41, 0x00,
   0x00, 0x00, 0x00, 0x00,
 };
+
+static const pxl_shader_desc pxl__sprite_frag = {
+  .spirv = {.code = pxl__sprite_frag_spirv, .size = sizeof pxl__sprite_frag_spirv},
+  .dxil = {.code = pxl__sprite_frag_dxil, .size = sizeof pxl__sprite_frag_dxil},
+  .msl = {.code = pxl__sprite_frag_msl, .size = sizeof pxl__sprite_frag_msl},
+  .num_textures = 1,
+  .has_uniforms = false,
+};
+
 static const uint8_t pxl__sprite_vert_spirv[] = {
   0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 0x0b, 0x00, 0x0d, 0x00,
   0x35, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00,
@@ -1937,6 +1946,14 @@ static const uint8_t pxl__sprite_vert_dxil[] = {
   0x06, 0x48, 0x1d, 0x80, 0x81, 0x1a, 0xc4, 0xc1, 0x19, 0x6c, 0x23, 0x06,
   0x09, 0x00, 0x82, 0x60, 0x80, 0xd4, 0x01, 0x18, 0xa8, 0x41, 0x1c, 0x94,
   0x01, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const pxl_shader_desc pxl__sprite_vert = {
+  .spirv = {.code = pxl__sprite_vert_spirv, .size = sizeof pxl__sprite_vert_spirv},
+  .dxil = {.code = pxl__sprite_vert_dxil, .size = sizeof pxl__sprite_vert_dxil},
+  .msl = {.code = pxl__sprite_vert_msl, .size = sizeof pxl__sprite_vert_msl},
+  .num_textures = 0,
+  .has_uniforms = true,
 };
 // clang-format on
 // END GENERATED SHADERS
@@ -3025,37 +3042,13 @@ static bool pxl__create_samplers(pxl_context* ctx) {
 }
 
 static bool pxl__create_shaders(pxl_context* ctx) {
-  const pxl_shader_desc vertex = {
-      .spirv = {.code = pxl__sprite_vert_spirv,
-                .size = sizeof pxl__sprite_vert_spirv},
-      .dxil  = {.code = pxl__sprite_vert_dxil,
-                .size = sizeof pxl__sprite_vert_dxil},
-      .msl   = {.code = pxl__sprite_vert_msl,
-                .size = sizeof pxl__sprite_vert_msl},
-  };
-  ctx->vertex_shader =
-      pxl__create_gpu_shader(ctx, SDL_GPU_SHADERSTAGE_VERTEX, &vertex, 0, 1);
+  // The vertex shader reads no textures and one uniform buffer.
+  ctx->vertex_shader = pxl__create_gpu_shader(ctx, SDL_GPU_SHADERSTAGE_VERTEX,
+                                              &pxl__sprite_vert, 0, 1);
   if (!ctx->vertex_shader) {
     return false;
   }
-  ctx->default_shader =
-      pxl_create_shader(ctx, &(pxl_shader_desc){
-                                 .spirv =
-                                     {
-                                         .code = pxl__sprite_frag_spirv,
-                                         .size = sizeof pxl__sprite_frag_spirv,
-                                     },
-                                 .dxil =
-                                     {
-                                         .code = pxl__sprite_frag_dxil,
-                                         .size = sizeof pxl__sprite_frag_dxil,
-                                     },
-                                 .msl =
-                                     {
-                                         .code = pxl__sprite_frag_msl,
-                                         .size = sizeof pxl__sprite_frag_msl,
-                                     },
-                             });
+  ctx->default_shader = pxl_create_shader(ctx, &pxl__sprite_frag);
   return ctx->default_shader != nullptr;
 }
 
