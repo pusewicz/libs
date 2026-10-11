@@ -390,7 +390,8 @@ bool pxl_update_texture(pxl_context* ctx, pxl_texture* texture, int x, int y,
  *               top to bottom, with premultiplied alpha.
  * @return false on failure.
  */
-bool pxl_read_texture(pxl_context* ctx, pxl_texture* texture, void* pixels);
+bool pxl_read_texture(pxl_context* ctx, const pxl_texture* texture,
+                      void* pixels);
 
 /** Gets the width of a texture in pixels. */
 int pxl_texture_width(const pxl_texture* texture);
@@ -517,7 +518,7 @@ typedef struct pxl_sprite {
  * @param texture The texture.
  * @param sprite How to draw it.
  */
-void pxl_draw_sprite(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_sprite(pxl_context* ctx, const pxl_texture* texture,
                      const pxl_sprite* sprite);
 
 /** How to draw a texture area that stretches without its border. */
@@ -540,7 +541,7 @@ typedef struct pxl_nine_slice {
  * @param texture The texture.
  * @param slice How to draw it.
  */
-void pxl_draw_nine_slice(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_nine_slice(pxl_context* ctx, const pxl_texture* texture,
                          const pxl_nine_slice* slice);
 
 /**
@@ -632,7 +633,7 @@ typedef struct pxl_vertex {
  * @param vertices Three vertices for each triangle.
  * @param count The number of vertices. A multiple of 3.
  */
-void pxl_draw_triangles(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_triangles(pxl_context* ctx, const pxl_texture* texture,
                         const pxl_vertex* vertices, size_t count);
 
 /** A bitmap font: a texture with one glyph in each cell of a grid. */
@@ -2682,7 +2683,8 @@ bool pxl_update_texture(pxl_context* ctx, pxl_texture* texture, int x, int y,
                      texture->premultiplied);
 }
 
-bool pxl_read_texture(pxl_context* ctx, pxl_texture* texture, void* pixels) {
+bool pxl_read_texture(pxl_context* ctx, const pxl_texture* texture,
+                      void* pixels) {
   PXL_ASSERT(ctx && texture && pixels);
   size_t size = (size_t)texture->width * (size_t)texture->height * 4u;
   if (size > UINT32_MAX) {
@@ -3474,7 +3476,7 @@ static void pxl__draw_region(pxl_context* ctx, const pxl_texture* texture,
   pxl__quad(ctx, texture, p, uv, color, overlay);
 }
 
-void pxl_draw_sprite(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_sprite(pxl_context* ctx, const pxl_texture* texture,
                      const pxl_sprite* sprite) {
   PXL_ASSERT(ctx && texture && sprite);
   pxl_rect src = pxl__source(texture, sprite->src);
@@ -3507,7 +3509,7 @@ void pxl_draw_sprite(pxl_context* ctx, pxl_texture* texture,
   pxl__draw_region(ctx, texture, &t, src, 0.0f, 0.0f, color, sprite->overlay);
 }
 
-void pxl_draw_nine_slice(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_nine_slice(pxl_context* ctx, const pxl_texture* texture,
                          const pxl_nine_slice* slice) {
   PXL_ASSERT(ctx && texture && slice);
   pxl_rect src     = pxl__source(texture, slice->src);
@@ -3794,7 +3796,7 @@ void pxl_draw_triangle(pxl_context* ctx, float x0, float y0, float x1, float y1,
   pxl_draw_triangles(ctx, nullptr, vertices, 3);
 }
 
-void pxl_draw_triangles(pxl_context* ctx, pxl_texture* texture,
+void pxl_draw_triangles(pxl_context* ctx, const pxl_texture* texture,
                         const pxl_vertex* vertices, size_t count) {
   PXL_ASSERT(ctx && (vertices || count == 0) && count % 3 == 0);
   count -= count % 3;
