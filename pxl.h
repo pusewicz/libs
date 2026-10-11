@@ -2081,6 +2081,7 @@ static_assert(sizeof(pxl__vertex) == 28);
 
 struct pxl_texture {
   SDL_GPUTexture* handle;
+  SDL_GPUTextureFormat format;
   int width, height;
   pxl_filter filter;
   pxl_wrap wrap;
@@ -2161,6 +2162,8 @@ struct pxl_context {
   SDL_GPUSampler* samplers[2][3];
   pxl_texture* white;
   pxl_texture* canvas;
+  /** The target of pxl_end_frame_into(), which shows the canvas. */
+  pxl_texture screen;
   pxl_font* default_font;
   int width, height;
   pxl_scale_mode scale_mode;
@@ -2713,6 +2716,7 @@ static pxl_texture* pxl__create_texture(pxl_context* ctx,
     return nullptr;
   }
   *texture = (pxl_texture){
+      .format        = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
       .width         = desc->width,
       .height        = desc->height,
       .filter        = desc->filter,
@@ -2724,16 +2728,16 @@ static pxl_texture* pxl__create_texture(pxl_context* ctx,
   if (desc->render_target) {
     usage |= SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
   }
-  texture->handle = SDL_CreateGPUTexture(
-      ctx->device, &(SDL_GPUTextureCreateInfo){
-                       .type   = SDL_GPU_TEXTURETYPE_2D,
-                       .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                       .usage  = usage,
-                       .width  = (Uint32)desc->width,
-                       .height = (Uint32)desc->height,
-                       .layer_count_or_depth = 1,
-                       .num_levels           = 1,
-                   });
+  texture->handle =
+      SDL_CreateGPUTexture(ctx->device, &(SDL_GPUTextureCreateInfo){
+                                            .type   = SDL_GPU_TEXTURETYPE_2D,
+                                            .format = texture->format,
+                                            .usage  = usage,
+                                            .width  = (Uint32)desc->width,
+                                            .height = (Uint32)desc->height,
+                                            .layer_count_or_depth = 1,
+                                            .num_levels           = 1,
+                                        });
   if (!texture->handle) {
     PXL_FREE(texture);
     return nullptr;
@@ -4319,19 +4323,22 @@ void pxl_begin_frame(pxl_context* ctx) {
   }
 }
 
-/** Starts a render pass, and binds the geometry of the frame. */
+/**
+ * Starts a render pass for the target of a command, and binds the geometry
+ * of the frame. A clear command clears the target.
+ */
 static SDL_GPURenderPass* pxl__begin_pass(pxl_context* ctx,
                                           SDL_GPUCommandBuffer* cmd,
-                                          SDL_GPUTexture* texture, int w, int h,
-                                          const pxl_color* clear, bool cycle) {
+                                          const pxl__command* c) {
+  bool clear              = c->kind == PXL__COMMAND_CLEAR;
   SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(
       cmd,
       &(SDL_GPUColorTargetInfo){
-          .texture     = texture,
-          .clear_color = clear ? pxl__fcolor(*clear) : (SDL_FColor){},
+          .texture     = c->target->handle,
+          .clear_color = clear ? pxl__fcolor(c->clear_color) : (SDL_FColor){},
           .load_op     = clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD,
           .store_op    = SDL_GPU_STOREOP_STORE,
-          .cycle       = cycle && clear,
+          .cycle       = clear && c->target != &ctx->screen,
       },
       1, nullptr);
   if (!pass) {
@@ -4346,8 +4353,8 @@ static SDL_GPURenderPass* pxl__begin_pass(pxl_context* ctx,
                            SDL_GPU_INDEXELEMENTSIZE_32BIT);
   }
   SDL_SetGPUViewport(pass, &(SDL_GPUViewport){
-                               .w         = (float)w,
-                               .h         = (float)h,
+                               .w         = (float)c->target->width,
+                               .h         = (float)c->target->height,
                                .max_depth = 1.0f,
                            });
   ctx->stats.passes++;
@@ -4383,8 +4390,8 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
                         &c->clip, &(SDL_Rect){.w = w, .h = h}, &scissor)) {
     return;
   }
-  SDL_GPUGraphicsPipeline* pipeline = pxl__get_pipeline(
-      ctx, c->shader->handle, c->blend, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+  SDL_GPUGraphicsPipeline* pipeline =
+      pxl__get_pipeline(ctx, c->shader->handle, c->blend, c->target->format);
   if (!pipeline) {
     pxl__fail_sdl(ctx);
     return;
@@ -4415,20 +4422,26 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
   pass->last = c;
 }
 
-/** Records the commands of the frame into render passes. */
-static void pxl__render_commands(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
+/**
+ * Records the commands of the frame into render passes.
+ *
+ * @param draw false: the geometry is not on the GPU, so only clear.
+ */
+static void pxl__render_commands(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
+                                 bool draw) {
   pxl__pass pass = {};
   for (size_t i = 0; i < ctx->command_count; ++i) {
     const pxl__command* c = &ctx->commands[i];
     bool clear            = c->kind == PXL__COMMAND_CLEAR;
+    if (!clear && !draw) {
+      continue;
+    }
     if (clear || !pass.handle || c->target != pass.target) {
       if (pass.handle) {
         SDL_EndGPURenderPass(pass.handle);
       }
       pass        = (pxl__pass){.target = c->target};
-      pass.handle = pxl__begin_pass(ctx, cmd, c->target->handle,
-                                    c->target->width, c->target->height,
-                                    clear ? &c->clear_color : nullptr, true);
+      pass.handle = pxl__begin_pass(ctx, cmd, c);
       if (!pass.handle) {
         pass.target = nullptr;
         continue;
@@ -4496,17 +4509,10 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
   return true;
 }
 
-/**
- * Appends the quad that shows the canvas in the window. It is not part of a
- * batch.
- *
- * @return The first index of the quad, or -1.
- */
-static int64_t pxl__append_canvas_quad(pxl_context* ctx, bool sharp) {
-  pxl__geometry g = {};
-  if (!pxl__reserve(ctx, 4, 6, &g)) {
-    return -1;
-  }
+/** Appends the commands that show the canvas in the screen. */
+static void pxl__show_canvas(pxl_context* ctx) {
+  ctx->state = (pxl__state){.transform = pxl_identity, .target = &ctx->screen};
+  pxl_clear(ctx, ctx->letterbox);
   const pxl_rect* r  = &ctx->viewport;
   const pxl_vec2 p[] = {
       {.x = r->x, .y = r->y},
@@ -4515,70 +4521,32 @@ static int64_t pxl__append_canvas_quad(pxl_context* ctx, bool sharp) {
       {.x = r->x, .y = r->y + r->h},
   };
   const float uv[] = {0.0f, 0.0f, 1.0f, 1.0f};
-  pxl__write_quad(&g, p, uv,
-                  (pxl__vertex){
-                      .color  = pxl_white,
-                      .params = {0, (uint8_t)(sharp ? 255 : 0)},
-                  });
-  return (int64_t)ctx->index_count - 6;
-}
-
-/**
- * Shows the canvas in a target.
- *
- * @param first_index The first index of the canvas quad, or -1 to only clear.
- */
-static void pxl__render_canvas(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
-                               SDL_GPUTexture* target,
-                               SDL_GPUTextureFormat format, int w, int h,
-                               int64_t first_index, bool sharp) {
-  SDL_GPURenderPass* pass =
-      pxl__begin_pass(ctx, cmd, target, w, h, &ctx->letterbox, false);
-  if (!pass) {
-    return;
-  }
-  SDL_GPUGraphicsPipeline* pipeline = pxl__get_pipeline(
-      ctx, ctx->default_shader->handle, PXL_BLEND_ALPHA, format);
-  if (!pipeline) {
-    pxl__fail_sdl(ctx);
-  } else if (first_index >= 0) {
-    pxl__bind_pipeline(cmd, pass, pipeline, w, h);
-    SDL_SetGPUScissor(pass, &(SDL_Rect){.w = w, .h = h});
-    SDL_BindGPUFragmentSamplers(
-        pass, 0,
-        &(SDL_GPUTextureSamplerBinding){
-            .texture = ctx->canvas->handle,
-            .sampler = ctx->samplers[sharp ? 1 : 0][PXL_WRAP_CLAMP],
-        },
-        1);
-    SDL_DrawGPUIndexedPrimitives(pass, 6, 1, (Uint32)first_index, 0, 0);
-    ctx->stats.draw_calls++;
-  }
-  SDL_EndGPURenderPass(pass);
+  // Sharp filtering keeps the texels square at a scale that is not exact.
+  pxl_filter filter = ctx->canvas->filter;
+  bool exact = pxl__is_exact(*r, ctx->canvas->width, ctx->canvas->height);
+  ctx->canvas->filter = exact ? PXL_FILTER_NEAREST : PXL_FILTER_SHARP;
+  pxl__quad(ctx, ctx->canvas, p, uv, pxl_white, pxl_transparent);
+  ctx->canvas->filter = filter;
 }
 
 /** Records the frame into a command buffer. */
 static void pxl__record_frame(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
                               SDL_GPUTexture* target,
                               SDL_GPUTextureFormat format, int w, int h) {
-  int64_t canvas_quad = -1;
-  bool sharp          = false;
   if (target) {
+    ctx->screen = (pxl_texture){
+        .handle        = target,
+        .format        = format,
+        .width         = w,
+        .height        = h,
+        .render_target = true,
+    };
     pxl__update_viewport(ctx, w, h);
-    sharp =
-        !pxl__is_exact(ctx->viewport, ctx->canvas->width, ctx->canvas->height);
-    canvas_quad = pxl__append_canvas_quad(ctx, sharp);
+    pxl__show_canvas(ctx);
   }
   ctx->stats.vertices = ctx->vertex_count;
   ctx->stats.indices  = ctx->index_count;
-  bool uploaded       = pxl__upload_geometry(ctx, cmd);
-  if (uploaded) {
-    pxl__render_commands(ctx, cmd);
-  }
-  if (target) {
-    pxl__render_canvas(ctx, cmd, target, format, w, h,
-                       uploaded ? canvas_quad : -1, sharp);
-  }
+  pxl__render_commands(ctx, cmd, pxl__upload_geometry(ctx, cmd));
 }
 
 /** Drops the draws of the frame, and frees what the frame destroyed. */
