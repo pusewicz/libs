@@ -1,0 +1,164 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -2187,6 +2187,11 @@
+   pxl_shader* garbage_shaders;
+ 
+   pxl__state state;
++  /**
++   * The last command draws with the current state, except for the texture in
++   * slot 0. Each change to the state clears it.
++   */
++  bool batch_open;
+   pxl__state stack[pxl__stack_capacity];
+   size_t stack_depth;
+   pxl_stats stats;
+@@ -2232,6 +2237,11 @@
+   return false;
+ }
+ 
++/** Starts a new batch at the next draw. Call it when the state changes. */
++static void pxl__close_batch(pxl_context* ctx) {
++  ctx->batch_open = false;
++}
++
+ // ---------------------------------------------------------------------------
+ // Math
+ 
+@@ -2816,6 +2826,7 @@
+   for (size_t i = 0; i < ctx->stack_depth; ++i) {
+     pxl__forget_texture(&ctx->stack[i], texture);
+   }
++  pxl__close_batch(ctx);
+   if (ctx->in_frame) {
+     texture->next_garbage = ctx->garbage_textures;
+     ctx->garbage_textures = texture;
+@@ -2951,6 +2962,7 @@
+   if (ctx->state.shader == shader) {
+     ctx->state.shader = nullptr;
+   }
++  pxl__close_batch(ctx);
+   for (size_t i = 0; i < ctx->stack_depth; ++i) {
+     if (ctx->stack[i].shader == shader) {
+       ctx->stack[i].shader = nullptr;
+@@ -3071,6 +3083,7 @@
+   if (ctx->canvas) {
+     pxl__forget_texture(&ctx->state, ctx->canvas);
+     pxl__free_texture(ctx, ctx->canvas);
++    pxl__close_batch(ctx);
+   }
+   ctx->canvas = canvas;
+   return true;
+@@ -3264,6 +3277,7 @@
+   PXL_ASSERT(ctx && ctx->stack_depth > 0);
+   if (ctx->stack_depth > 0) {
+     ctx->state = ctx->stack[--ctx->stack_depth];
++    pxl__close_batch(ctx);
+   }
+ }
+ 
+@@ -3305,6 +3319,7 @@
+   PXL_ASSERT(ctx);
+   PXL_ASSERT(!target || target->render_target);
+   ctx->state.target = target && target->render_target ? target : nullptr;
++  pxl__close_batch(ctx);
+ }
+ 
+ int pxl_get_width(const pxl_context* ctx) {
+@@ -3320,17 +3335,20 @@
+ void pxl_set_blend(pxl_context* ctx, pxl_blend blend) {
+   PXL_ASSERT(ctx);
+   ctx->state.blend = blend;
++  pxl__close_batch(ctx);
+ }
+ 
+ void pxl_set_clip(pxl_context* ctx, int x, int y, int w, int h) {
+   PXL_ASSERT(ctx);
+   ctx->state.clip    = (SDL_Rect){.x = x, .y = y, .w = w, .h = h};
+   ctx->state.clipped = true;
++  pxl__close_batch(ctx);
+ }
+ 
+ void pxl_reset_clip(pxl_context* ctx) {
+   PXL_ASSERT(ctx);
+   ctx->state.clipped = false;
++  pxl__close_batch(ctx);
+ }
+ 
+ void pxl_set_snap(pxl_context* ctx, bool snap) {
+@@ -3341,6 +3359,7 @@
+ void pxl_set_shader(pxl_context* ctx, pxl_shader* shader) {
+   PXL_ASSERT(ctx);
+   ctx->state.shader = shader;
++  pxl__close_batch(ctx);
+ }
+ 
+ void pxl_set_shader_texture(pxl_context* ctx, size_t slot,
+@@ -3348,11 +3367,13 @@
+   PXL_ASSERT(ctx && slot > 0 && slot < pxl_max_textures);
+   if (slot > 0 && slot < pxl_max_textures) {
+     ctx->state.textures[slot] = texture;
++    pxl__close_batch(ctx);
+   }
+ }
+ 
+ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size) {
+   PXL_ASSERT(ctx && ctx->in_frame);
++  pxl__close_batch(ctx);
+   if (!data || size == 0) {
+     ctx->state.uniform_offset = 0;
+     ctx->state.uniform_size   = 0;
+@@ -3408,6 +3429,13 @@
+  */
+ static pxl__command* pxl__draw_command(pxl_context* ctx,
+                                        const pxl_texture* texture) {
++  if (ctx->batch_open) {
++    pxl__command* open = &ctx->commands[ctx->command_count - 1];
++    if (!texture || (open->bindings[0].texture == texture->handle &&
++                     open->bindings[0].sampler == pxl__sampler(ctx, texture))) {
++      return open;
++    }
++  }
+   const pxl__state* s = &ctx->state;
+   pxl_shader* shader  = s->shader ? s->shader : ctx->default_shader;
+   pxl__command next   = {
+@@ -3429,6 +3457,8 @@
+   pxl__command* last =
+       ctx->command_count ? &ctx->commands[ctx->command_count - 1] : nullptr;
+   bool same = last && pxl__same_state(last, &next);
++  // The samplers of slots 1 and up can change without the context.
++  ctx->batch_open = shader->num_textures == 1;
+   if (same && !texture) {
+     return last;
+   }
+@@ -3441,6 +3471,7 @@
+       pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
+                 &ctx->command_capacity);
+   if (!commands) {
++    ctx->batch_open = false;
+     return nullptr;
+   }
+   ctx->commands                       = commands;
+@@ -3617,6 +3648,7 @@
+     return;
+   }
+   ctx->commands                       = commands;
++  pxl__close_batch(ctx);
+   ctx->commands[ctx->command_count++] = (pxl__command){
+       .kind        = PXL__COMMAND_CLEAR,
+       .target      = pxl__target(ctx),
+@@ -4328,6 +4360,7 @@
+   ctx->failed      = false;
+   ctx->state       = (pxl__state){.transform = pxl_identity, .snap = true};
+   ctx->stack_depth = 0;
++  pxl__close_batch(ctx);
+   if (!pxl__update_canvas(ctx)) {
+     pxl__fail(ctx, SDL_GetError());
+   }
+@@ -4624,6 +4657,7 @@
+   ctx->index_count   = 0;
+   ctx->command_count = 0;
+   ctx->uniform_size  = 0;
++  pxl__close_batch(ctx);
+   pxl__collect_garbage(ctx);
+ }
+ 

@@ -1,0 +1,13 @@
+scene             record      end  end:pxl end:SDL+drv   (Ir per item)  draws
+sprites            461.0     37.7     36.4         1.4                  1
+sprites_rot        545.6     37.7     36.4         1.4                  1
+sprites_2tex       519.0   2327.8    261.2      2066.6                  2000
+rects              401.0     37.7     36.4         1.4                  1
+text               386.0     28.6     27.3         1.4                  1
+circles           7125.2    673.7    646.3        27.4                  1
+circle_lines     20536.2    877.3    849.7        27.5                  1
+lines            16545.0    684.7    670.9        13.7                  1
+rect_lines        1312.7    145.5    140.0         5.5                  1
+triangles          180.0     98.8     96.1         2.7                  1
+update_texture   27563.1   9040.8   4148.2      4892.7                  1
+mixed              622.5    199.8    182.6        17.2                  3

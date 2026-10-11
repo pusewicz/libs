@@ -1,0 +1,246 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -2108,6 +2108,16 @@
+   uint8_t* advances;
+ };
+ 
++/** A texture update of the frame. Its pixels are in the staging memory. */
++typedef struct pxl__staged_upload {
++  SDL_GPUTexture* texture;
++  Uint32 x, y, w, h;
++  size_t offset;
++} pxl__staged_upload;
++
++/** Texture data in transfer buffers starts at a multiple of this. */
++constexpr size_t pxl__upload_align = 512;
++
+ typedef struct pxl__pipeline {
+   SDL_GPUShader* fragment;
+   SDL_GPUTextureFormat format;
+@@ -2175,6 +2185,11 @@
+   size_t command_count, command_capacity;
+   uint8_t* uniforms;
+   size_t uniform_size, uniform_capacity;
++  /** The pixels of the texture updates of the frame. */
++  uint8_t* staged;
++  size_t staged_size, staged_capacity;
++  pxl__staged_upload* uploads;
++  size_t upload_count, upload_capacity;
+ 
+   SDL_GPUBuffer* vertex_buffer;
+   size_t vertex_buffer_size;
+@@ -2598,6 +2613,29 @@
+ // ---------------------------------------------------------------------------
+ // Textures
+ 
++/** Copies w * h pixels to `dst`, and premultiplies them if needed. */
++static void pxl__copy_pixels(uint8_t* dst, size_t w, size_t h,
++                             const void* pixels, size_t pitch,
++                             bool premultiplied) {
++  size_t row = w * 4u;
++  if (!pixels) {
++    memset(dst, 0, row * h);
++    return;
++  }
++  const uint8_t* source = pixels;
++  for (size_t j = 0; j < h; ++j) {
++    uint8_t* line = dst + (j * row);
++    memcpy(line, source + (j * pitch), row);
++    if (!premultiplied) {
++      for (size_t i = 0; i < row; i += 4) {
++        line[i + 0] = pxl__premultiply(line[i + 0], line[i + 3]);
++        line[i + 1] = pxl__premultiply(line[i + 1], line[i + 3]);
++        line[i + 2] = pxl__premultiply(line[i + 2], line[i + 3]);
++      }
++    }
++  }
++}
++
+ /**
+  * Uploads pixels to an area of a texture now.
+  *
+@@ -2627,22 +2665,7 @@
+     SDL_ReleaseGPUTransferBuffer(ctx->device, transfer);
+     return false;
+   }
+-  if (!pixels) {
+-    memset(mapped, 0, size);
+-  } else {
+-    const uint8_t* source = pixels;
+-    for (size_t j = 0; j < (size_t)h; ++j) {
+-      uint8_t* dst = mapped + (j * row);
+-      memcpy(dst, source + (j * pitch), row);
+-      if (!premultiplied) {
+-        for (size_t i = 0; i < row; i += 4) {
+-          dst[i + 0] = pxl__premultiply(dst[i + 0], dst[i + 3]);
+-          dst[i + 1] = pxl__premultiply(dst[i + 1], dst[i + 3]);
+-          dst[i + 2] = pxl__premultiply(dst[i + 2], dst[i + 3]);
+-        }
+-      }
+-    }
+-  }
++  pxl__copy_pixels(mapped, (size_t)w, (size_t)h, pixels, pitch, premultiplied);
+   SDL_UnmapGPUTransferBuffer(ctx->device, transfer);
+ 
+   SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
+@@ -2831,8 +2854,42 @@
+       h > texture->height - y) {
+     return SDL_SetError("pxl: the area is outside of the texture");
+   }
+-  return pxl__upload(ctx, texture, x, y, w, h, pixels, (size_t)w * 4u,
+-                     texture->premultiplied);
++  if (!ctx->in_frame) {
++    return pxl__upload(ctx, texture, x, y, w, h, pixels, (size_t)w * 4u,
++                       texture->premultiplied);
++  }
++  // In a frame, the frame uploads the pixels before its first draw.
++  size_t offset = (ctx->staged_size + pxl__upload_align - 1) &
++                  ~(pxl__upload_align - 1);
++  size_t size = 0;
++  size_t end  = 0;
++  if (ckd_mul(&size, (size_t)w * 4u, (size_t)h) ||
++      ckd_add(&end, offset, size) || end > UINT32_MAX) {
++    return SDL_SetError("pxl: texture too large");
++  }
++  uint8_t* staged = pxl__grow(ctx->staged, 1, end, &ctx->staged_capacity);
++  if (!staged) {
++    return SDL_OutOfMemory();
++  }
++  ctx->staged          = staged;
++  pxl__staged_upload* uploads = pxl__grow(ctx->uploads, sizeof *ctx->uploads,
++                                   ctx->upload_count + 1, &ctx->upload_capacity);
++  if (!uploads) {
++    return SDL_OutOfMemory();
++  }
++  ctx->uploads = uploads;
++  pxl__copy_pixels(ctx->staged + offset, (size_t)w, (size_t)h, pixels,
++                   (size_t)w * 4u, texture->premultiplied);
++  ctx->uploads[ctx->upload_count++] = (pxl__staged_upload){
++      .texture = texture->handle,
++      .x       = (Uint32)x,
++      .y       = (Uint32)y,
++      .w       = (Uint32)w,
++      .h       = (Uint32)h,
++      .offset  = offset,
++  };
++  ctx->staged_size = end;
++  return true;
+ }
+ 
+ bool pxl_read_texture(pxl_context* ctx, pxl_texture* texture, void* pixels) {
+@@ -3202,6 +3259,8 @@
+   PXL_FREE(ctx->indices);
+   PXL_FREE(ctx->commands);
+   PXL_FREE(ctx->uniforms);
++  PXL_FREE(ctx->staged);
++  PXL_FREE(ctx->uploads);
+   PXL_FREE(ctx);
+ }
+ 
+@@ -4477,21 +4536,26 @@
+ 
+ /** Uploads the vertices and indices of the frame to the GPU. */
+ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
+-  if (ctx->vertex_count == 0) {
++  if (ctx->vertex_count == 0 && ctx->upload_count == 0) {
+     return true;
+   }
++  // The transfer buffer holds the staged pixels, the vertices, the indices.
++  size_t pixel_bytes  = (ctx->staged_size + pxl__upload_align - 1) &
++                       ~(pxl__upload_align - 1);
+   size_t vertex_bytes = 0;
+   size_t index_bytes  = 0;
+   size_t total        = 0;
+   if (ckd_mul(&vertex_bytes, ctx->vertex_count, sizeof *ctx->vertices) ||
+       ckd_mul(&index_bytes, ctx->index_count, sizeof *ctx->indices) ||
+-      ckd_add(&total, vertex_bytes, index_bytes) || total > UINT32_MAX) {
++      ckd_add(&total, vertex_bytes, index_bytes) ||
++      ckd_add(&total, total, pixel_bytes) || total > UINT32_MAX) {
+     return pxl__fail(ctx, "too many vertices");
+   }
+-  if (!pxl__reserve_buffer(ctx, &ctx->vertex_buffer, &ctx->vertex_buffer_size,
+-                           vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX) ||
+-      !pxl__reserve_buffer(ctx, &ctx->index_buffer, &ctx->index_buffer_size,
+-                           index_bytes, SDL_GPU_BUFFERUSAGE_INDEX) ||
++  if ((vertex_bytes > 0 &&
++       (!pxl__reserve_buffer(ctx, &ctx->vertex_buffer, &ctx->vertex_buffer_size,
++                             vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX) ||
++        !pxl__reserve_buffer(ctx, &ctx->index_buffer, &ctx->index_buffer_size,
++                             index_bytes, SDL_GPU_BUFFERUSAGE_INDEX))) ||
+       !pxl__reserve_transfer(ctx, total)) {
+     return pxl__fail(ctx, SDL_GetError());
+   }
+@@ -4500,14 +4564,43 @@
+   if (!mapped) {
+     return pxl__fail(ctx, SDL_GetError());
+   }
+-  memcpy(mapped, ctx->vertices, vertex_bytes);
+-  memcpy(mapped + vertex_bytes, ctx->indices, index_bytes);
++  if (ctx->staged_size > 0) {
++    memcpy(mapped, ctx->staged, ctx->staged_size);
++  }
++  memcpy(mapped + pixel_bytes, ctx->vertices, vertex_bytes);
++  memcpy(mapped + pixel_bytes + vertex_bytes, ctx->indices, index_bytes);
+   SDL_UnmapGPUTransferBuffer(ctx->device, ctx->transfer_buffer);
+ 
+   SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
++  for (size_t i = 0; i < ctx->upload_count; ++i) {
++    const pxl__staged_upload* u = &ctx->uploads[i];
++    SDL_UploadToGPUTexture(copy,
++                           &(SDL_GPUTextureTransferInfo){
++                               .transfer_buffer = ctx->transfer_buffer,
++                               .offset          = (Uint32)u->offset,
++                               .pixels_per_row  = u->w,
++                               .rows_per_layer  = u->h,
++                           },
++                           &(SDL_GPUTextureRegion){
++                               .texture = u->texture,
++                               .x       = u->x,
++                               .y       = u->y,
++                               .w       = u->w,
++                               .h       = u->h,
++                               .d       = 1,
++                           },
++                           false);
++  }
++  ctx->upload_count = 0;
++  ctx->staged_size  = 0;
++  if (vertex_bytes == 0) {
++    SDL_EndGPUCopyPass(copy);
++    return true;
++  }
+   SDL_UploadToGPUBuffer(copy,
+                         &(SDL_GPUTransferBufferLocation){
+                             .transfer_buffer = ctx->transfer_buffer,
++                            .offset          = (Uint32)pixel_bytes,
+                         },
+                         &(SDL_GPUBufferRegion){
+                             .buffer = ctx->vertex_buffer,
+@@ -4517,7 +4610,7 @@
+   SDL_UploadToGPUBuffer(copy,
+                         &(SDL_GPUTransferBufferLocation){
+                             .transfer_buffer = ctx->transfer_buffer,
+-                            .offset          = (Uint32)vertex_bytes,
++                            .offset = (Uint32)(pixel_bytes + vertex_bytes),
+                         },
+                         &(SDL_GPUBufferRegion){
+                             .buffer = ctx->index_buffer,
+@@ -4619,6 +4712,18 @@
+ 
+ /** Drops the draws of the frame, and frees what the frame destroyed. */
+ static void pxl__reset_frame(pxl_context* ctx) {
++  if (ctx->upload_count > 0) {
++    // The frame did not record: upload the staged pixels now.
++    ctx->vertex_count = 0;
++    ctx->index_count  = 0;
++    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
++    if (!cmd || !pxl__upload_geometry(ctx, cmd) ||
++        !SDL_SubmitGPUCommandBuffer(cmd)) {
++      pxl__fail(ctx, SDL_GetError());
++    }
++    ctx->upload_count = 0;
++    ctx->staged_size  = 0;
++  }
+   ctx->in_frame      = false;
+   ctx->vertex_count  = 0;
+   ctx->index_count   = 0;

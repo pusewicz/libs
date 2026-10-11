@@ -1,0 +1,117 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -3533,13 +3533,24 @@
+  *          bottom-left of the texture area.
+  * @param uv The texture area: u0, v0, u1, v1.
+  */
++static void pxl__write_quad(const pxl__geometry* g, const pxl_texture* texture,
++                            const pxl_vec2 p[static 4], const float uv[static 4],
++                            pxl_color color, pxl_color overlay);
++
+ static void pxl__quad(pxl_context* ctx, const pxl_texture* texture,
+                       const pxl_vec2 p[static 4], const float uv[static 4],
+                       pxl_color color, pxl_color overlay) {
+   pxl__geometry g = {};
+-  if (!pxl__append(ctx, texture, 4, 6, &g)) {
+-    return;
++  if (pxl__append(ctx, texture, 4, 6, &g)) {
++    pxl__write_quad(&g, texture, p, uv, color, overlay);
+   }
++}
++
++/** Writes one quad at the start of reserved geometry. */
++static void pxl__write_quad(const pxl__geometry* gp, const pxl_texture* texture,
++                            const pxl_vec2 p[static 4], const float uv[static 4],
++                            pxl_color color, pxl_color overlay) {
++  pxl__geometry g = *gp;
+   const float u[] = {uv[0], uv[2], uv[2], uv[0]};
+   const float v[] = {uv[1], uv[1], uv[3], uv[3]};
+   for (size_t i = 0; i < 4; ++i) {
+@@ -4212,33 +4223,26 @@
+   return ctx->state.font ? ctx->state.font : ctx->default_font;
+ }
+ 
+-/** Draws an area of a texture with its top-left corner at (x, y). */
+-static void pxl__draw_region(pxl_context* ctx, const pxl_texture* texture,
+-                             pxl_rect src, float x, float y, pxl_color color) {
+-  const pxl_transform* t = &ctx->state.transform;
+-  pxl_vec2 p[]           = {
+-      pxl__apply(t, x, y),
+-      pxl__apply(t, x + src.w, y),
+-      pxl__apply(t, x + src.w, y + src.h),
+-      pxl__apply(t, x, y + src.h),
+-  };
+-  pxl__snap_quad(ctx, p);
+-  float tw         = (float)texture->width;
+-  float th         = (float)texture->height;
+-  const float uv[] = {
+-      src.x / tw,
+-      src.y / th,
+-      (src.x + src.w) / tw,
+-      (src.y + src.h) / th,
+-  };
+-  pxl__quad(ctx, texture, p, uv, color, pxl_transparent);
+-}
+-
+ static void pxl__draw_string(pxl_context* ctx, float x, float y,
+                              pxl_color color, const char* text) {
+   const pxl_font* font = pxl__font(ctx);
+-  float pen_x          = x;
+-  float pen_y          = y;
++  // Count the glyphs first, to reserve them in one batch.
++  size_t quads = 0;
++  for (const char* s = text; *s;) {
++    uint32_t code_point = pxl__next_code_point(&s);
++    quads += code_point != '\n' && code_point != ' ' &&
++             pxl__glyph(font, code_point) >= 0;
++  }
++  pxl__geometry g = {};
++  if (quads == 0 || !pxl__append(ctx, font->texture, quads * 4, quads * 6, &g)) {
++    return;
++  }
++  const pxl_transform* t = &ctx->state.transform;
++  float tw               = (float)font->texture->width;
++  float th               = (float)font->texture->height;
++  uint32_t columns       = (uint32_t)font->columns;
++  float pen_x            = x;
++  float pen_y            = y;
+   while (*text) {
+     uint32_t code_point = pxl__next_code_point(&text);
+     if (code_point == '\n') {
+@@ -4251,15 +4255,31 @@
+       continue;
+     }
+     if (code_point != ' ') {
+-      int64_t column     = glyph % font->columns;
+-      int64_t row        = glyph / font->columns;
++      uint32_t column    = (uint32_t)glyph % columns;
++      uint32_t row       = (uint32_t)glyph / columns;
+       const pxl_rect src = {
+-          .x = (float)(column * font->glyph_width),
+-          .y = (float)(row * font->glyph_height),
++          .x = (float)((int64_t)column * font->glyph_width),
++          .y = (float)((int64_t)row * font->glyph_height),
+           .w = (float)font->glyph_width,
+           .h = (float)font->glyph_height,
+       };
+-      pxl__draw_region(ctx, font->texture, src, pen_x, pen_y, color);
++      pxl_vec2 p[] = {
++          pxl__apply(t, pen_x, pen_y),
++          pxl__apply(t, pen_x + src.w, pen_y),
++          pxl__apply(t, pen_x + src.w, pen_y + src.h),
++          pxl__apply(t, pen_x, pen_y + src.h),
++      };
++      pxl__snap_quad(ctx, p);
++      const float uv[] = {
++          src.x / tw,
++          src.y / th,
++          (src.x + src.w) / tw,
++          (src.y + src.h) / th,
++      };
++      pxl__write_quad(&g, font->texture, p, uv, color, pxl_transparent);
++      g.vertices += 4;
++      g.indices += 6;
++      g.base += 4;
+     }
+     pen_x += pxl__advance(font, glyph);
+   }
