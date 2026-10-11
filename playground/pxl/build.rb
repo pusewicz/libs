@@ -104,6 +104,9 @@ module PxlPlayground
   # it without SDL_gpu.c, which gpu.c replaces. Returns the paths of the
   # archive and of the removed object.
   def sdl_archive
+    # The port writes sdl3.pc into this directory, but in a new cache it does
+    # not exist yet.
+    FileUtils.mkdir_p("#{emscripten_cache}/sysroot/lib/pkgconfig")
     run("embuilder", "build", "sdl3", "--pic")
     source = "#{emscripten_cache}/sysroot/lib/wasm32-emscripten/pic/libSDL3.a"
     archive = "#{WORK}/libSDL3.a"
