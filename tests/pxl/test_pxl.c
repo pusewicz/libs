@@ -585,6 +585,37 @@ TEST_CASE(test_destroy_during_frame) {
   return true;
 }
 
+// Destroyed resources leave the draw state and the saved states.
+TEST_CASE(test_destroy_in_state) {
+  pxl_texture* target = pxl_create_texture(
+      gpu.pxl,
+      &(pxl_texture_desc){.width = 4, .height = 4, .render_target = true});
+  pxl_shader* shader  = pxl_create_shader(gpu.pxl, &slots_frag);
+  pxl_texture* glyphs = own_texture(quad_texture(gpu.pxl));
+  pxl_font* font      = pxl_create_font(
+      gpu.pxl,
+      &(pxl_font_desc){.texture = glyphs, .glyph_width = 1, .glyph_height = 1});
+  pxl_begin_frame(gpu.pxl);
+  pxl_set_target(gpu.pxl, target);
+  pxl_set_shader(gpu.pxl, shader);
+  pxl_set_shader_texture(gpu.pxl, 1, target);
+  pxl_set_font(gpu.pxl, font);
+  pxl_push(gpu.pxl);
+  pxl_destroy_texture(gpu.pxl, target);
+  pxl_destroy_shader(gpu.pxl, shader);
+  pxl_destroy_font(gpu.pxl, font);
+  REQUIRE(target && shader && font);
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  pxl_pop(gpu.pxl);
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  REQUIRE(pxl_measure_text(gpu.pxl, "A").x == 6.0f);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_draw_rect(gpu.pxl, 0, 0, 1, 1, red);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(0, 0), red, 0));
+  return true;
+}
+
 TEST_CASE(test_measure_text) {
   pxl_vec2 size = pxl_measure_text(gpu.pxl, "Hi");
   REQUIRE(size.x == 8.0f && size.y == 10.0f);
@@ -898,6 +929,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_update_texture);
   RUN_TEST_CASE(test_batching);
   RUN_TEST_CASE(test_destroy_during_frame);
+  RUN_TEST_CASE(test_destroy_in_state);
   RUN_TEST_CASE(test_measure_text);
   RUN_TEST_CASE(test_draw_text);
   RUN_TEST_CASE(test_custom_font);
