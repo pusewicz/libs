@@ -41,10 +41,12 @@ function loadSaved() {
 
 const saved = loadSaved();
 
+/** Saves values. Another tab can save too, so this keeps its other values. */
 function save(changes) {
   Object.assign(saved, changes);
   try {
-    localStorage.setItem(storageKey, JSON.stringify(saved));
+    const stored = { ...loadSaved(), ...changes };
+    localStorage.setItem(storageKey, JSON.stringify(stored));
   } catch {
     // The playground works without storage.
   }
@@ -214,6 +216,11 @@ addEventListener("message", (event) => {
   }
 });
 
+// A hidden page can stop its timers. Start the count again when it shows.
+document.addEventListener("visibilitychange", () => {
+  lastAlive = performance.now();
+});
+
 /** Stops the program if its frame is silent: it loops forever. */
 setInterval(() => {
   if (document.visibilityState !== "visible") {
@@ -288,6 +295,10 @@ function finishBuild({ program: bytes, output, time }) {
   building = false;
   builtOk = bytes !== null;
   finishedBuilds++;
+  // This build answers a Run that came during it, if the code is the same.
+  if (view.state.doc.toString() === builtSource) {
+    restartQueued = false;
+  }
   const { diagnostics, errors, warnings } = parseDiagnostics(
     output,
     view.state.doc,
@@ -449,6 +460,8 @@ elements.auto.addEventListener("change", () => {
   save({ auto: elements.auto.checked });
   if (elements.auto.checked) {
     requestBuild();
+  } else {
+    clearTimeout(buildTimer);
   }
 });
 
