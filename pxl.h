@@ -2099,7 +2099,6 @@ struct pxl_shader {
 
 struct pxl_font {
   pxl_texture* texture;
-  bool owns_texture;
   int glyph_width, glyph_height;
   int columns;
   int line_height;
@@ -4094,9 +4093,6 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
       ctx->stack[i].font = nullptr;
     }
   }
-  if (font->owns_texture) {
-    pxl_destroy_texture(ctx, font->texture);
-  }
   PXL_FREE(font->advances);
   PXL_FREE(font);
 }
@@ -4163,7 +4159,6 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
     pxl__free_texture(ctx, texture);
     return nullptr;
   }
-  font->owns_texture = true;
   return font;
 }
 
