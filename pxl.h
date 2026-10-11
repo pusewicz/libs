@@ -2330,20 +2330,14 @@ static SDL_FColor pxl__fcolor(pxl_color color) {
   };
 }
 
-/**
- * Computes where the canvas goes in the window.
- *
- * @param exact Set to true if each canvas pixel covers whole window pixels.
- */
+/** Computes where the canvas goes in the window. */
 static pxl_rect pxl__fit(int canvas_w, int canvas_h, int window_w, int window_h,
-                         pxl_scale_mode mode, bool exact[static 1]) {
+                         pxl_scale_mode mode) {
   float cw = (float)canvas_w;
   float ch = (float)canvas_h;
   float ww = (float)window_w;
   float wh = (float)window_h;
   if (mode == PXL_SCALE_STRETCH) {
-    *exact = window_w % canvas_w == 0 && window_h % canvas_h == 0 &&
-             window_w / canvas_w == window_h / canvas_h;
     return (pxl_rect){.w = ww, .h = wh};
   }
   float scale = fminf(ww / cw, wh / ch);
@@ -2352,13 +2346,19 @@ static pxl_rect pxl__fit(int canvas_w, int canvas_h, int window_w, int window_h,
   }
   float w = pxl__round(cw * scale);
   float h = pxl__round(ch * scale);
-  *exact  = scale >= 1.0f && scale == floorf(scale);
   return (pxl_rect){
       .x = floorf((ww - w) / 2.0f),
       .y = floorf((wh - h) / 2.0f),
       .w = w,
       .h = h,
   };
+}
+
+/** Returns true if each canvas pixel covers the same whole window pixels. */
+static bool pxl__is_exact(pxl_rect viewport, int canvas_w, int canvas_h) {
+  float scale_x = viewport.w / (float)canvas_w;
+  float scale_y = viewport.h / (float)canvas_h;
+  return scale_x >= 1.0f && scale_x == floorf(scale_x) && scale_x == scale_y;
 }
 
 // ---------------------------------------------------------------------------
@@ -3082,20 +3082,14 @@ static bool pxl__update_canvas(pxl_context* ctx) {
   return true;
 }
 
-/**
- * Updates the viewport from the size of the window in pixels.
- *
- * @return true if each canvas pixel covers whole window pixels.
- */
-static bool pxl__update_viewport(pxl_context* ctx, int window_w, int window_h) {
-  bool exact    = false;
+/** Updates the viewport from the size of the window in pixels. */
+static void pxl__update_viewport(pxl_context* ctx, int window_w, int window_h) {
   ctx->viewport = pxl__fit(ctx->canvas->width, ctx->canvas->height, window_w,
-                           window_h, ctx->scale_mode, &exact);
+                           window_h, ctx->scale_mode);
   float density = ctx->window ? SDL_GetWindowPixelDensity(ctx->window) : 0.0f;
   if (density > 0.0f) {
     ctx->pixel_density = density;
   }
-  return exact;
 }
 
 pxl_context* pxl_create(const pxl_desc* desc) {
@@ -4570,7 +4564,9 @@ static void pxl__record_frame(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
   int64_t canvas_quad = -1;
   bool sharp          = false;
   if (target) {
-    sharp       = !pxl__update_viewport(ctx, w, h);
+    pxl__update_viewport(ctx, w, h);
+    sharp =
+        !pxl__is_exact(ctx->viewport, ctx->canvas->width, ctx->canvas->height);
     canvas_quad = pxl__append_canvas_quad(ctx, sharp);
   }
   ctx->stats.vertices = ctx->vertex_count;

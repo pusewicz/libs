@@ -65,26 +65,31 @@ TEST_CASE(test_transforms) {
 }
 
 TEST_CASE(test_fit) {
-  bool exact = false;
-  pxl_rect r = pxl__fit(320, 180, 1280, 720, PXL_SCALE_INTEGER, &exact);
+  pxl_rect r = pxl__fit(320, 180, 1280, 720, PXL_SCALE_INTEGER);
   REQUIRE(r.x == 0.0f && r.y == 0.0f && r.w == 1280.0f && r.h == 720.0f);
-  REQUIRE(exact);
+  REQUIRE(pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_INTEGER, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_INTEGER);
   REQUIRE(r.x == 20.0f && r.y == 80.0f && r.w == 960.0f && r.h == 540.0f);
-  REQUIRE(exact);
+  REQUIRE(pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_FIT, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_FIT);
   REQUIRE(r.x == 0.0f && r.y == 68.0f && r.w == 1000.0f && r.h == 563.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_STRETCH, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_STRETCH);
   REQUIRE(r.x == 0.0f && r.y == 0.0f && r.w == 1000.0f && r.h == 700.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 200, 100, PXL_SCALE_INTEGER, &exact);
+  r = pxl__fit(320, 180, 960, 540, PXL_SCALE_STRETCH);
+  REQUIRE(pxl__is_exact(r, 320, 180));
+
+  r = pxl__fit(320, 180, 960, 360, PXL_SCALE_STRETCH);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
+
+  r = pxl__fit(320, 180, 200, 100, PXL_SCALE_INTEGER);
   REQUIRE(r.w < 200.5f && r.h <= 100.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
   return true;
 }
 
