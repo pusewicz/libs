@@ -2630,13 +2630,18 @@ static bool pxl__upload(pxl_context* ctx, pxl_texture* texture, int x, int y,
   } else {
     const uint8_t* source = pixels;
     for (size_t j = 0; j < (size_t)h; ++j) {
-      uint8_t* dst = mapped + (j * row);
-      memcpy(dst, source + (j * pitch), row);
-      if (!premultiplied) {
-        for (size_t i = 0; i < row; i += 4) {
-          dst[i + 0] = pxl__premultiply(dst[i + 0], dst[i + 3]);
-          dst[i + 1] = pxl__premultiply(dst[i + 1], dst[i + 3]);
-          dst[i + 2] = pxl__premultiply(dst[i + 2], dst[i + 3]);
+      const pxl_color* src = (const pxl_color*)(source + (j * pitch));
+      pxl_color* dst       = (pxl_color*)(mapped + (j * row));
+      if (premultiplied) {
+        memcpy(dst, src, row);
+      } else {
+        for (size_t i = 0; i < (size_t)w; ++i) {
+          dst[i] = (pxl_color){
+              .r = pxl__premultiply(src[i].r, src[i].a),
+              .g = pxl__premultiply(src[i].g, src[i].a),
+              .b = pxl__premultiply(src[i].b, src[i].a),
+              .a = src[i].a,
+          };
         }
       }
     }
