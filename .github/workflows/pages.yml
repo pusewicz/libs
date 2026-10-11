@@ -13,6 +13,7 @@ on:
       - rakelib/pxl.rake
       - examples/pxl/**
       - tests/pxl/**
+      - third_party/**
       - playground/**
       - .github/workflows/pages.yml
   push:
@@ -24,6 +25,7 @@ on:
       - rakelib/pxl.rake
       - examples/pxl/**
       - tests/pxl/**
+      - third_party/**
       - playground/**
       - .github/workflows/pages.yml
   workflow_dispatch:

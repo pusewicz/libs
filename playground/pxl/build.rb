@@ -131,7 +131,8 @@ module PxlPlayground
     jobs += %w[gpu host].map { |name| ["#{objects}/#{name}.o", "#{SOURCE}/#{name}.c", c_flags] }
     jobs.map do |object, source, command|
       Thread.new do
-        inputs = [source, "compile_flags.txt", __FILE__]
+        # A new Emscripten copies the SDL archive again: then compile again.
+        inputs = [source, "compile_flags.txt", __FILE__, "#{WORK}/libSDL3.a"]
         inputs << "pxl.h" if source.end_with?("host.c")
         run(*command, "-c", source, "-o", object) unless FileUtils.uptodate?(object, inputs)
       end
