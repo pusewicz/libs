@@ -752,9 +752,12 @@ TEST_CASE(test_custom_shader_plain_color) {
   pxl_shader* shader = own_shader(pxl_create_shader(gpu.pxl, &slots_frag));
   pxl_texture* extra = own_texture(pxl_create_texture(
       gpu.pxl, &(pxl_texture_desc){.width = 1, .height = 1, .pixels = &green}));
-  pxl_texture* clear = own_texture(pxl_create_texture(
-      gpu.pxl, &(pxl_texture_desc){
-                   .width = 1, .height = 1, .pixels = &pxl_transparent}));
+  pxl_texture* clear =
+      own_texture(pxl_create_texture(gpu.pxl, &(pxl_texture_desc){
+                                                  .width  = 1,
+                                                  .height = 1,
+                                                  .pixels = &pxl_transparent,
+                                              }));
   REQUIRE(shader && extra && clear);
   const float add_red[] = {1.0f, 0.0f, 0.0f, 0.0f};
   pxl_begin_frame(gpu.pxl);
