@@ -3561,12 +3561,31 @@ static void pxl__params(const pxl_texture* texture, uint8_t params[static 4]) {
 }
 
 /**
- * Appends a quad.
+ * Writes a quad into reserved geometry.
  *
  * @param p The corners in target pixels: top-left, top-right, bottom-right,
  *          bottom-left of the texture area.
  * @param uv The texture area: u0, v0, u1, v1.
+ * @param vertex The color, overlay and params of all corners.
  */
+static void pxl__write_quad(const pxl__geometry* g, const pxl_vec2 p[static 4],
+                            const float uv[static 4], pxl__vertex vertex) {
+  const float u[] = {uv[0], uv[2], uv[2], uv[0]};
+  const float v[] = {uv[1], uv[1], uv[3], uv[3]};
+  for (size_t i = 0; i < 4; ++i) {
+    vertex.x       = p[i].x;
+    vertex.y       = p[i].y;
+    vertex.u       = u[i];
+    vertex.v       = v[i];
+    g->vertices[i] = vertex;
+  }
+  const uint32_t order[] = {0, 1, 2, 0, 2, 3};
+  for (size_t i = 0; i < 6; ++i) {
+    g->indices[i] = g->base + order[i];
+  }
+}
+
+/** Appends a quad. See pxl__write_quad(). */
 static void pxl__quad(pxl_context* ctx, const pxl_texture* texture,
                       const pxl_vec2 p[static 4], const float uv[static 4],
                       pxl_color color, pxl_color overlay) {
@@ -3574,23 +3593,9 @@ static void pxl__quad(pxl_context* ctx, const pxl_texture* texture,
   if (!pxl__append(ctx, texture, 4, 6, &g)) {
     return;
   }
-  const float u[] = {uv[0], uv[2], uv[2], uv[0]};
-  const float v[] = {uv[1], uv[1], uv[3], uv[3]};
-  for (size_t i = 0; i < 4; ++i) {
-    g.vertices[i] = (pxl__vertex){
-        .x       = p[i].x,
-        .y       = p[i].y,
-        .u       = u[i],
-        .v       = v[i],
-        .color   = color,
-        .overlay = overlay,
-    };
-    pxl__params(texture, g.vertices[i].params);
-  }
-  const uint32_t order[] = {0, 1, 2, 0, 2, 3};
-  for (size_t i = 0; i < 6; ++i) {
-    g.indices[i] = g.base + order[i];
-  }
+  pxl__vertex vertex = {.color = color, .overlay = overlay};
+  pxl__params(texture, vertex.params);
+  pxl__write_quad(&g, p, uv, vertex);
 }
 
 /** Fills a rectangle of target pixels. The transform does not apply. */
@@ -4558,25 +4563,19 @@ static int64_t pxl__append_canvas_quad(pxl_context* ctx, bool sharp) {
   if (!pxl__reserve(ctx, 4, 6, &g)) {
     return -1;
   }
-  const pxl_rect* r = &ctx->viewport;
-  const float x[]   = {r->x, r->x + r->w, r->x + r->w, r->x};
-  const float y[]   = {r->y, r->y, r->y + r->h, r->y + r->h};
-  const float u[]   = {0.0f, 1.0f, 1.0f, 0.0f};
-  const float v[]   = {0.0f, 0.0f, 1.0f, 1.0f};
-  for (size_t i = 0; i < 4; ++i) {
-    g.vertices[i] = (pxl__vertex){
-        .x      = x[i],
-        .y      = y[i],
-        .u      = u[i],
-        .v      = v[i],
-        .color  = pxl_white,
-        .params = {0, (uint8_t)(sharp ? 255 : 0)},
-    };
-  }
-  const uint32_t order[] = {0, 1, 2, 0, 2, 3};
-  for (size_t i = 0; i < 6; ++i) {
-    g.indices[i] = g.base + order[i];
-  }
+  const pxl_rect* r  = &ctx->viewport;
+  const pxl_vec2 p[] = {
+      {.x = r->x, .y = r->y},
+      {.x = r->x + r->w, .y = r->y},
+      {.x = r->x + r->w, .y = r->y + r->h},
+      {.x = r->x, .y = r->y + r->h},
+  };
+  const float uv[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  pxl__write_quad(&g, p, uv,
+                  (pxl__vertex){
+                      .color  = pxl_white,
+                      .params = {0, (uint8_t)(sharp ? 255 : 0)},
+                  });
   return (int64_t)ctx->index_count - 6;
 }
 
