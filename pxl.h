@@ -3413,6 +3413,21 @@ static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
   return true;
 }
 
+/** Appends a command to the frame. Returns it, or nullptr. */
+static pxl__command* pxl__add_command(pxl_context* ctx,
+                                      const pxl__command* command) {
+  pxl__command* commands =
+      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
+                &ctx->command_capacity);
+  if (!commands) {
+    pxl__fail(ctx, "out of memory");
+    return nullptr;
+  }
+  ctx->commands                     = commands;
+  ctx->commands[ctx->command_count] = *command;
+  return &ctx->commands[ctx->command_count++];
+}
+
 /**
  * Gets the draw command for the current state and a texture. Extends the
  * last command if the state is the same.
@@ -3453,15 +3468,7 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
       last->bindings[0].sampler == next.bindings[0].sampler) {
     return last;
   }
-  pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
-  if (!commands) {
-    return nullptr;
-  }
-  ctx->commands                       = commands;
-  ctx->commands[ctx->command_count++] = next;
-  return &ctx->commands[ctx->command_count - 1];
+  return pxl__add_command(ctx, &next);
 }
 
 typedef struct pxl__geometry {
@@ -3536,7 +3543,7 @@ static bool pxl__append(pxl_context* ctx, const pxl_texture* texture,
   }
   pxl__command* command = pxl__draw_command(ctx, texture);
   if (!command) {
-    return pxl__fail(ctx, "out of memory");
+    return false;
   }
   if (!pxl__reserve(ctx, vertex_count, index_count, out)) {
     return false;
@@ -3640,19 +3647,11 @@ void pxl_clear(pxl_context* ctx, pxl_color color) {
     pxl__fail(ctx, "clear outside of a frame");
     return;
   }
-  pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
-  if (!commands) {
-    pxl__fail(ctx, "out of memory");
-    return;
-  }
-  ctx->commands                       = commands;
-  ctx->commands[ctx->command_count++] = (pxl__command){
-      .kind        = PXL__COMMAND_CLEAR,
-      .target      = pxl__target(ctx),
-      .clear_color = color,
-  };
+  pxl__add_command(ctx, &(pxl__command){
+                            .kind        = PXL__COMMAND_CLEAR,
+                            .target      = pxl__target(ctx),
+                            .clear_color = color,
+                        });
 }
 
 /** Gets the area of a texture, or the whole texture for a zero size. */
