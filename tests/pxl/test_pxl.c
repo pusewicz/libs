@@ -636,6 +636,9 @@ TEST_CASE(test_measure_text) {
   REQUIRE(size.x == 6.0f && size.y == 10.0f);
   size = pxl_measure_text(gpu.pxl, "a\xe2");
   REQUIRE(size.x == 12.0f);
+  // U+20000 is one code point, so one '?'.
+  size = pxl_measure_text(gpu.pxl, "\xf0\xa0\x80\x80");
+  REQUIRE(size.x == 6.0f);
   return true;
 }
 
@@ -691,6 +694,15 @@ TEST_CASE(test_custom_font) {
   pxl_set_font(gpu.pxl, font);
   pxl_draw_text(gpu.pxl, 0, 0, pxl_white, "ABAz");
   REQUIRE(pxl_measure_text(gpu.pxl, "AB").x == 4.0f);
+  pxl_font* icons = own_font(pxl_create_font(gpu.pxl, &(pxl_font_desc){
+                                                          .texture = texture,
+                                                          .glyph_width  = 2,
+                                                          .glyph_height = 2,
+                                                          .first = 0xf0001,
+                                                      }));
+  REQUIRE(icons != nullptr);
+  pxl_set_font(gpu.pxl, icons);
+  REQUIRE(pxl_measure_text(gpu.pxl, "\xf3\xb0\x80\x81").x == 2.0f);
   pxl_set_font(gpu.pxl, nullptr);
   REQUIRE(pxl_measure_text(gpu.pxl, "AB").x == 12.0f);
   REQUIRE(finish());
