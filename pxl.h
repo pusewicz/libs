@@ -4287,9 +4287,13 @@ static bool pxl__upload_geometry(pxl_context* ctx, SDL_GPUCommandBuffer* cmd) {
   return true;
 }
 
-/** Appends the commands that show the canvas in the screen. */
+/**
+ * Appends the commands that show the canvas in the screen. Keeps the draw
+ * state of the user, which the getters read between frames.
+ */
 static void pxl__show_canvas(pxl_context* ctx) {
-  ctx->state = (pxl__state){
+  pxl__state state = ctx->state;
+  ctx->state       = (pxl__state){
       .transform = pxl_identity,
       .target    = &ctx->screen,
       .clip      = pxl__no_clip,
@@ -4309,6 +4313,7 @@ static void pxl__show_canvas(pxl_context* ctx) {
   ctx->canvas->filter = exact ? PXL_FILTER_NEAREST : PXL_FILTER_SHARP;
   pxl__quad(ctx, ctx->canvas, p, uv, pxl_white, pxl_transparent);
   ctx->canvas->filter = filter;
+  ctx->state          = state;
 }
 
 /** Records the frame into a command buffer. */

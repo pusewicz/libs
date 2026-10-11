@@ -781,11 +781,14 @@ TEST_CASE(test_present) {
   static pxl_color pixels[(size_t)w * h];
   REQUIRE(screen != nullptr);
 
-  // Scale 1, in the middle.
+  // Scale 1, in the middle. The draw state stays after the frame.
   pxl_begin_frame(gpu.pxl);
   pxl_clear(gpu.pxl, red);
   pxl_draw_pixel(gpu.pxl, 0, 0, pxl_white);
+  pxl_translate(gpu.pxl, 3.0f, 0.0f);
   REQUIRE(present(screen, pixels));
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  REQUIRE(pxl_get_transform(gpu.pxl).tx == 3.0f);
   pxl_rect v = pxl_get_viewport(gpu.pxl);
   REQUIRE(v.x == 12 && v.y == 4 && v.w == 16 && v.h == 16);
   REQUIRE(same_color(pixels[(4 * w) + 12], pxl_white, 0));
