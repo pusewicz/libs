@@ -2362,51 +2362,35 @@ static pxl_rect pxl__fit(int canvas_w, int canvas_h, int window_w, int window_h,
 // ---------------------------------------------------------------------------
 // GPU helpers
 
-typedef struct pxl__code {
-  const uint8_t* code;
-  size_t size;
-  const char* entrypoint;
-} pxl__code;
-
+/** Creates a GPU shader from the code for the shader format of the device. */
 static SDL_GPUShader* pxl__create_gpu_shader(pxl_context* ctx,
                                              SDL_GPUShaderStage stage,
-                                             pxl__code code,
+                                             const pxl_shader_desc* desc,
                                              size_t num_samplers,
                                              size_t num_uniform_buffers) {
-  if (!code.code || code.size == 0) {
+  const pxl_shader_code* code = &desc->spirv;
+  const char* entrypoint      = "main";
+  if (ctx->shader_format == SDL_GPU_SHADERFORMAT_DXIL) {
+    code = &desc->dxil;
+  } else if (ctx->shader_format == SDL_GPU_SHADERFORMAT_MSL) {
+    code       = &desc->msl;
+    entrypoint = "main0";
+  }
+  if (!code->code || code->size == 0) {
     SDL_SetError("pxl: no shader code for the format of the device");
     return nullptr;
   }
   return SDL_CreateGPUShader(
-      ctx->device, &(SDL_GPUShaderCreateInfo){
-                       .code_size           = code.size,
-                       .code                = code.code,
-                       .entrypoint          = code.entrypoint,
-                       .format              = ctx->shader_format,
-                       .stage               = stage,
-                       .num_samplers        = (Uint32)num_samplers,
-                       .num_uniform_buffers = (Uint32)num_uniform_buffers,
-                   });
-}
-
-/** Selects the code for the shader format of the device. */
-static pxl__code pxl__select_code(const pxl_context* ctx,
-                                  const pxl_shader_code* spirv,
-                                  const pxl_shader_code* dxil,
-                                  const pxl_shader_code* msl) {
-  const pxl_shader_code* code = spirv;
-  const char* entrypoint      = "main";
-  if (ctx->shader_format == SDL_GPU_SHADERFORMAT_DXIL) {
-    code = dxil;
-  } else if (ctx->shader_format == SDL_GPU_SHADERFORMAT_MSL) {
-    code       = msl;
-    entrypoint = "main0";
-  }
-  return (pxl__code){
-      .code       = code->code,
-      .size       = code->size,
-      .entrypoint = code->entrypoint ? code->entrypoint : entrypoint,
-  };
+      ctx->device,
+      &(SDL_GPUShaderCreateInfo){
+          .code_size    = code->size,
+          .code         = code->code,
+          .entrypoint   = code->entrypoint ? code->entrypoint : entrypoint,
+          .format       = ctx->shader_format,
+          .stage        = stage,
+          .num_samplers = (Uint32)num_samplers,
+          .num_uniform_buffers = (Uint32)num_uniform_buffers,
+      });
 }
 
 static SDL_GPUColorTargetBlendState pxl__blend_state(pxl_blend blend) {
@@ -2953,10 +2937,9 @@ pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
       .num_textures = num_textures,
       .has_uniforms = desc->has_uniforms,
   };
-  shader->handle = pxl__create_gpu_shader(
-      ctx, SDL_GPU_SHADERSTAGE_FRAGMENT,
-      pxl__select_code(ctx, &desc->spirv, &desc->dxil, &desc->msl),
-      num_textures, desc->has_uniforms ? 1 : 0);
+  shader->handle =
+      pxl__create_gpu_shader(ctx, SDL_GPU_SHADERSTAGE_FRAGMENT, desc,
+                             num_textures, desc->has_uniforms ? 1 : 0);
   if (!shader->handle) {
     PXL_FREE(shader);
     return nullptr;
@@ -3026,14 +3009,16 @@ static bool pxl__create_samplers(pxl_context* ctx) {
 }
 
 static bool pxl__create_shaders(pxl_context* ctx) {
-  const pxl_shader_code vertex[] = {
-      {.code = pxl__sprite_vert_spirv, .size = sizeof pxl__sprite_vert_spirv},
-      {.code = pxl__sprite_vert_dxil, .size = sizeof pxl__sprite_vert_dxil},
-      {.code = pxl__sprite_vert_msl, .size = sizeof pxl__sprite_vert_msl},
+  const pxl_shader_desc vertex = {
+      .spirv = {.code = pxl__sprite_vert_spirv,
+                .size = sizeof pxl__sprite_vert_spirv},
+      .dxil  = {.code = pxl__sprite_vert_dxil,
+                .size = sizeof pxl__sprite_vert_dxil},
+      .msl   = {.code = pxl__sprite_vert_msl,
+                .size = sizeof pxl__sprite_vert_msl},
   };
-  ctx->vertex_shader = pxl__create_gpu_shader(
-      ctx, SDL_GPU_SHADERSTAGE_VERTEX,
-      pxl__select_code(ctx, &vertex[0], &vertex[1], &vertex[2]), 0, 1);
+  ctx->vertex_shader =
+      pxl__create_gpu_shader(ctx, SDL_GPU_SHADERSTAGE_VERTEX, &vertex, 0, 1);
   if (!ctx->vertex_shader) {
     return false;
   }
