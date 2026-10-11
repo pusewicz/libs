@@ -683,6 +683,30 @@ TEST_CASE(test_custom_shader) {
   return true;
 }
 
+// The slots shader ignores v_params.x. A plain color draw after a sprite
+// must not sample the texture of the sprite.
+TEST_CASE(test_custom_shader_plain_color) {
+  pxl_shader* shader = own_shader(pxl_create_shader(gpu.pxl, &slots_frag));
+  pxl_texture* extra = own_texture(pxl_create_texture(
+      gpu.pxl, &(pxl_texture_desc){.width = 1, .height = 1, .pixels = &green}));
+  pxl_texture* clear = own_texture(pxl_create_texture(
+      gpu.pxl, &(pxl_texture_desc){
+                   .width = 1, .height = 1, .pixels = &pxl_transparent}));
+  REQUIRE(shader && extra && clear);
+  const float add_red[] = {1.0f, 0.0f, 0.0f, 0.0f};
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_set_shader(gpu.pxl, shader);
+  pxl_set_shader_texture(gpu.pxl, 1, extra);
+  REQUIRE(pxl_set_uniforms(gpu.pxl, add_red, sizeof add_red));
+  pxl_draw_sprite(gpu.pxl, clear, &(pxl_sprite){.x = 8, .y = 8});
+  pxl_draw_rect(gpu.pxl, 0, 0, 4, 4, pxl_white);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(0, 0), (pxl_color){255, 255, 0, 255}, 0));
+  REQUIRE(same_color(pixel_at(8, 8), pxl_black, 0));
+  return true;
+}
+
 /** Ends the frame into a screen texture and reads the screen. */
 static bool present(pxl_texture* screen, pxl_color* pixels) {
   SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device);
@@ -866,6 +890,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_draw_text);
   RUN_TEST_CASE(test_custom_font);
   RUN_TEST_CASE(test_custom_shader);
+  RUN_TEST_CASE(test_custom_shader_plain_color);
   RUN_TEST_CASE(test_present);
   RUN_TEST_CASE(test_load_texture);
   RUN_TEST_CASE(test_create_errors);

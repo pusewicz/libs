@@ -3403,8 +3403,10 @@ static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
  * Gets the draw command for the current state and a texture. Extends the
  * last command if the state is the same.
  *
- * @param texture The texture, or nullptr for plain color. Plain color can
- *                use any texture, so it keeps the batch of the last draw.
+ * @param texture The texture, or nullptr for plain color. The default shader
+ *                ignores the texture for plain color, so plain color keeps
+ *                its batch. A custom shader can sample the texture, so it
+ *                gets white.
  */
 static pxl__command* pxl__draw_command(pxl_context* ctx,
                                        const pxl_texture* texture) {
@@ -3429,7 +3431,7 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
   pxl__command* last =
       ctx->command_count ? &ctx->commands[ctx->command_count - 1] : nullptr;
   bool same = last && pxl__same_state(last, &next);
-  if (same && !texture) {
+  if (same && !texture && shader == ctx->default_shader) {
     return last;
   }
   next.bindings[0] = pxl__binding(ctx, texture ? texture : ctx->white);
