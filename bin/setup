@@ -5,7 +5,7 @@
 # Usage: bin/setup [-n]
 #   -n  Print the commands. Do not run them.
 #
-# Keep the package lists in sync with .github/workflows/ci.yml.
+# CI runs this script, so the package lists here are the CI packages.
 
 set -eu
 
