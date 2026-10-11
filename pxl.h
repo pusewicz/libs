@@ -1943,6 +1943,8 @@ static const uint8_t pxl__sprite_vert_dxil[] = {
 
 // BEGIN GENERATED FONT
 // clang-format off
+constexpr int pxl__font_width = 5;
+constexpr int pxl__font_height = 9;
 static const uint8_t pxl__font_rows[95][9] = {
   {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // 0x20
   {0x10, 0x10, 0x10, 0x10, 0x10, 0x00, 0x10, 0x00, 0x00}, // 0x21
@@ -2067,14 +2069,15 @@ constexpr SDL_Rect pxl__no_clip = {
 /** Floats hold all whole numbers up to this. */
 constexpr float pxl__coordinate_limit = 16777216.0f;
 
-// The built-in font: glyphs of 5 x 9 pixels in cells of 6 x 10 texels.
-constexpr int pxl__font_width        = 5;
-constexpr int pxl__font_height       = 9;
-constexpr int pxl__font_cell_width   = 6;
-constexpr int pxl__font_cell_height  = 10;
+// The built-in font: each glyph has one texel of space on its right and
+// below, in a grid of 16 columns.
+constexpr int pxl__font_cell_width   = pxl__font_width + 1;
+constexpr int pxl__font_cell_height  = pxl__font_height + 1;
 constexpr int pxl__font_grid_columns = 16;
-constexpr int pxl__font_grid_rows    = 6;
-constexpr size_t pxl__format_buffer  = 256;
+constexpr int pxl__font_grid_rows =
+    (int)((SDL_arraysize(pxl__font_rows) + pxl__font_grid_columns - 1) /
+          pxl__font_grid_columns);
+constexpr size_t pxl__format_buffer = 256;
 
 typedef struct pxl__vertex {
   float x, y, u, v;
@@ -4090,7 +4093,6 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   constexpr int width    = pxl__font_grid_columns * pxl__font_cell_width;
   constexpr int height   = pxl__font_grid_rows * pxl__font_cell_height;
   constexpr size_t count = SDL_arraysize(pxl__font_rows);
-  static_assert(count <= (size_t)pxl__font_grid_columns * pxl__font_grid_rows);
 
   constexpr size_t size = sizeof(pxl_color) * (size_t)width * (size_t)height;
   pxl_color* pixels     = PXL_MALLOC(size);
