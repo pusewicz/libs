@@ -3385,24 +3385,33 @@ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size) {
 // ---------------------------------------------------------------------------
 // Batching
 
-static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
-  if (a->kind != b->kind || a->target != b->target || a->shader != b->shader ||
-      a->blend != b->blend || a->clipped != b->clipped ||
-      a->uniform_offset != b->uniform_offset ||
-      a->uniform_size != b->uniform_size ||
-      a->num_bindings != b->num_bindings) {
+/** Returns true if two commands bind the same textures from slot `first`. */
+static bool pxl__same_bindings(const pxl__command* a, const pxl__command* b,
+                               size_t first) {
+  if (a->num_bindings != b->num_bindings) {
     return false;
   }
-  if (a->clipped && !SDL_RectsEqual(&a->clip, &b->clip)) {
-    return false;
-  }
-  for (size_t i = 1; i < a->num_bindings; ++i) {
+  for (size_t i = first; i < a->num_bindings; ++i) {
     if (a->bindings[i].texture != b->bindings[i].texture ||
         a->bindings[i].sampler != b->bindings[i].sampler) {
       return false;
     }
   }
   return true;
+}
+
+/** Returns true if two commands have the same state, except slot 0. */
+static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
+  if (a->kind != b->kind || a->target != b->target || a->shader != b->shader ||
+      a->blend != b->blend || a->clipped != b->clipped ||
+      a->uniform_offset != b->uniform_offset ||
+      a->uniform_size != b->uniform_size) {
+    return false;
+  }
+  if (a->clipped && !SDL_RectsEqual(&a->clip, &b->clip)) {
+    return false;
+  }
+  return pxl__same_bindings(a, b, 1);
 }
 
 /** Appends a command to the frame. Returns it, or nullptr. */
@@ -3456,8 +3465,7 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
     return last;
   }
   next.bindings[0] = pxl__binding(ctx, texture ? texture : ctx->white);
-  if (same && last->bindings[0].texture == next.bindings[0].texture &&
-      last->bindings[0].sampler == next.bindings[0].sampler) {
+  if (same && pxl__same_bindings(last, &next, 0)) {
     return last;
   }
   return pxl__add_command(ctx, &next);
@@ -4389,19 +4397,6 @@ typedef struct pxl__pass {
   const pxl__command* last;
 } pxl__pass;
 
-static bool pxl__same_bindings(const pxl__command* a, const pxl__command* b) {
-  if (a->num_bindings != b->num_bindings) {
-    return false;
-  }
-  for (size_t i = 0; i < a->num_bindings; ++i) {
-    if (a->bindings[i].texture != b->bindings[i].texture ||
-        a->bindings[i].sampler != b->bindings[i].sampler) {
-      return false;
-    }
-  }
-  return true;
-}
-
 /** Records one draw command into the current render pass. */
 static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
                              pxl__pass pass[static 1], const pxl__command* c) {
@@ -4428,7 +4423,7 @@ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
       (c->clipped && !SDL_RectsEqual(&last->clip, &c->clip))) {
     SDL_SetGPUScissor(pass->handle, &scissor);
   }
-  if (c->num_bindings > 0 && (!last || !pxl__same_bindings(last, c))) {
+  if (c->num_bindings > 0 && (!last || !pxl__same_bindings(last, c, 0))) {
     SDL_BindGPUFragmentSamplers(pass->handle, 0, c->bindings,
                                 (Uint32)c->num_bindings);
   }
