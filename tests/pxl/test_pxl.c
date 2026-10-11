@@ -627,6 +627,10 @@ TEST_CASE(test_measure_text) {
   REQUIRE(size.x == 12.0f);
   size = pxl_measure_text(gpu.pxl, "%300s", "a");
   REQUIRE(size.x == (299.0f * 4.0f) + 6.0f);
+  size = pxl_measure_text(gpu.pxl, "a%cb", 0);
+  REQUIRE(size.x == 6.0f && size.y == 10.0f);
+  size = pxl_measure_text(gpu.pxl, "a\xe2");
+  REQUIRE(size.x == 12.0f);
   return true;
 }
 

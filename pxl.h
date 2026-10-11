@@ -4166,56 +4166,29 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
 /**
  * Formats text into `buffer`, or into new memory if `buffer` is too small.
  *
+ * @param length Set to the length of the text in bytes.
  * @return The text, or nullptr. Free it with PXL_FREE() if it is not
  *         `buffer`.
  */
-PXL_PRINTF(3, 0)
-static char* pxl__vformat(char* buffer, size_t size, const char* format,
-                          va_list args) {
+PXL_PRINTF(4, 0)
+static char* pxl__vformat(char* buffer, size_t size, size_t length[static 1],
+                          const char* format, va_list args) {
   va_list copy;
   va_copy(copy, args);
-  int length = SDL_vsnprintf(buffer, size, format, copy);
+  int result = SDL_vsnprintf(buffer, size, format, copy);
   va_end(copy);
-  if (length < 0) {
+  if (result < 0) {
     return nullptr;
   }
-  if ((size_t)length < size) {
+  *length = (size_t)result;
+  if (*length < size) {
     return buffer;
   }
-  char* text = PXL_MALLOC((size_t)length + 1);
+  char* text = PXL_MALLOC(*length + 1);
   if (text) {
-    SDL_vsnprintf(text, (size_t)length + 1, format, args);
+    SDL_vsnprintf(text, *length + 1, format, args);
   }
   return text;
-}
-
-/** Reads one UTF-8 code point and moves `text` past it. */
-static uint32_t pxl__next_code_point(const char* text[static 1]) {
-  const unsigned char* s = (const unsigned char*)*text;
-  uint32_t code_point    = s[0];
-  size_t length          = 1;
-  if (s[0] >= 0xf0 && s[0] < 0xf8) {
-    code_point = s[0] & 0x07u;
-    length     = 4;
-  } else if (s[0] >= 0xe0) {
-    code_point = s[0] & 0x0fu;
-    length     = 3;
-  } else if (s[0] >= 0xc0) {
-    code_point = s[0] & 0x1fu;
-    length     = 2;
-  } else if (s[0] >= 0x80) {
-    *text += 1;
-    return 0xfffd;
-  }
-  for (size_t i = 1; i < length; ++i) {
-    if ((s[i] & 0xc0u) != 0x80u) {
-      *text += i;
-      return 0xfffd;
-    }
-    code_point = (code_point << 6) | (s[i] & 0x3fu);
-  }
-  *text += length;
-  return code_point;
 }
 
 /** Gets the glyph of a code point, the glyph of '?', or -1. */
@@ -4239,13 +4212,14 @@ static const pxl_font* pxl__font(const pxl_context* ctx) {
   return ctx->state.font ? ctx->state.font : ctx->default_font;
 }
 
+/** Draws `length` bytes of UTF-8 text. */
 static void pxl__draw_string(pxl_context* ctx, float x, float y,
-                             pxl_color color, const char* text) {
+                             pxl_color color, const char* text, size_t length) {
   const pxl_font* font = pxl__font(ctx);
   float pen_x          = x;
   float pen_y          = y;
-  while (*text) {
-    uint32_t code_point = pxl__next_code_point(&text);
+  uint32_t code_point  = 0;
+  while ((code_point = SDL_StepUTF8(&text, &length)) != 0) {
     if (code_point == '\n') {
       pen_x = x;
       pen_y += (float)font->line_height;
@@ -4275,15 +4249,16 @@ void pxl_draw_text(pxl_context* ctx, float x, float y, pxl_color color,
                    const char* format, ...) {
   PXL_ASSERT(ctx && format);
   char buffer[pxl__format_buffer];
+  size_t length = 0;
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  char* text = pxl__vformat(buffer, sizeof buffer, &length, format, args);
   va_end(args);
   if (!text) {
     pxl__fail(ctx, "cannot format the text");
     return;
   }
-  pxl__draw_string(ctx, x, y, color, text);
+  pxl__draw_string(ctx, x, y, color, text, length);
   if (text != buffer) {
     PXL_FREE(text);
   }
@@ -4292,9 +4267,10 @@ void pxl_draw_text(pxl_context* ctx, float x, float y, pxl_color color,
 pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
   PXL_ASSERT(ctx && format);
   char buffer[pxl__format_buffer];
+  size_t length = 0;
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  char* text = pxl__vformat(buffer, sizeof buffer, &length, format, args);
   va_end(args);
   if (!text) {
     return (pxl_vec2){};
@@ -4303,8 +4279,9 @@ pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
   float width          = 0.0f;
   float line           = 0.0f;
   size_t lines         = *text ? 1 : 0;
-  for (const char* s = text; *s;) {
-    uint32_t code_point = pxl__next_code_point(&s);
+  const char* s        = text;
+  uint32_t code_point  = 0;
+  while ((code_point = SDL_StepUTF8(&s, &length)) != 0) {
     if (code_point == '\n') {
       line = 0.0f;
       lines++;
