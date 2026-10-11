@@ -3184,8 +3184,8 @@ void pxl_destroy(pxl_context* ctx) {
     SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].handle);
   }
   SDL_ReleaseGPUShader(ctx->device, ctx->vertex_shader);
-  for (size_t f = 0; f < 2; ++f) {
-    for (size_t a = 0; a < 3; ++a) {
+  for (size_t f = 0; f < SDL_arraysize(ctx->samplers); ++f) {
+    for (size_t a = 0; a < SDL_arraysize(ctx->samplers[f]); ++a) {
       SDL_ReleaseGPUSampler(ctx->device, ctx->samplers[f][a]);
     }
   }
