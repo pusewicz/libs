@@ -716,7 +716,8 @@ typedef struct pxl_shader_code {
  *
  * The shader gets the inputs of tools/pxl/shaders/sprite.frag. It samples
  * the draw texture in slot 0 and the textures of pxl_set_shader_texture()
- * in the slots after it. Uniform buffer 0 holds the data of
+ * in the slots after it. A draw without a texture, for example a shape, has
+ * a white texture in slot 0. Uniform buffer 0 holds the data of
  * pxl_set_uniforms().
  */
 typedef struct pxl_shader_desc {
