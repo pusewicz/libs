@@ -4011,21 +4011,12 @@ void pxl_draw_circle_lines(pxl_context* ctx, float x, float y, float radius,
 
 void pxl_draw_triangle(pxl_context* ctx, float x0, float y0, float x1, float y1,
                        float x2, float y2, pxl_color color) {
-  PXL_ASSERT(ctx);
-  pxl__geometry g = {};
-  if (!pxl__append(ctx, nullptr, 3, 3, &g)) {
-    return;
-  }
-  const pxl_vec2 p[] = {
-      pxl__vertex_position(ctx, x0, y0),
-      pxl__vertex_position(ctx, x1, y1),
-      pxl__vertex_position(ctx, x2, y2),
+  const pxl_vertex vertices[] = {
+      {.x = x0, .y = y0, .color = color},
+      {.x = x1, .y = y1, .color = color},
+      {.x = x2, .y = y2, .color = color},
   };
-  for (size_t i = 0; i < 3; ++i) {
-    g.vertices[i] = (pxl__vertex){.x = p[i].x, .y = p[i].y, .color = color};
-    pxl__params(nullptr, g.vertices[i].params);
-    g.indices[i] = g.base + (uint32_t)i;
-  }
+  pxl_draw_triangles(ctx, nullptr, vertices, 3);
 }
 
 void pxl_draw_triangles(pxl_context* ctx, pxl_texture* texture,
