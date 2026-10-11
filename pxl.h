@@ -757,7 +757,8 @@ void pxl_set_shader(pxl_context* ctx, pxl_shader* shader);
  * @param ctx The context.
  * @param slot The slot, 1 to pxl_max_textures - 1. Slot 0 is the draw
  *             texture.
- * @param texture The texture, or nullptr for white.
+ * @param texture The texture, or nullptr for white. Do not draw into it
+ *                while the shader samples it.
  */
 void pxl_set_shader_texture(pxl_context* ctx, size_t slot,
                             pxl_texture* texture);
@@ -3348,6 +3349,10 @@ void pxl_set_shader(pxl_context* ctx, pxl_shader* shader) {
   ctx->state.shader = shader;
 }
 
+static pxl_shader* pxl__shader(const pxl_context* ctx) {
+  return ctx->state.shader ? ctx->state.shader : ctx->default_shader;
+}
+
 void pxl_set_shader_texture(pxl_context* ctx, size_t slot,
                             pxl_texture* texture) {
   PXL_ASSERT(ctx && slot > 0 && slot < pxl_max_textures);
@@ -3419,7 +3424,7 @@ static bool pxl__same_state(const pxl__command* a, const pxl__command* b) {
 static pxl__command* pxl__draw_command(pxl_context* ctx,
                                        const pxl_texture* texture) {
   const pxl__state* s = &ctx->state;
-  pxl_shader* shader  = s->shader ? s->shader : ctx->default_shader;
+  pxl_shader* shader  = pxl__shader(ctx);
   pxl__command next   = {
       .kind           = PXL__COMMAND_DRAW,
       .target         = pxl__target(ctx),
@@ -3496,6 +3501,17 @@ static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
   return true;
 }
 
+/** Returns true if a draw with a texture samples its own target. */
+static bool pxl__samples_target(const pxl_context* ctx,
+                                const pxl_texture* texture) {
+  const pxl_texture* target = pxl__target(ctx);
+  bool samples              = texture == target;
+  for (size_t i = 1; i < pxl__shader(ctx)->num_textures; ++i) {
+    samples = samples || ctx->state.textures[i] == target;
+  }
+  return samples;
+}
+
 /**
  * Reserves vertices and indices in the batch of a texture.
  *
@@ -3506,11 +3522,11 @@ static bool pxl__append(pxl_context* ctx, const pxl_texture* texture,
                         size_t vertex_count, size_t index_count,
                         pxl__geometry out[static 1]) {
   PXL_ASSERT(ctx->in_frame);
-  PXL_ASSERT(!texture || texture != pxl__target(ctx));
+  PXL_ASSERT(!pxl__samples_target(ctx, texture));
   if (!ctx->in_frame) {
     return pxl__fail(ctx, "draw outside of a frame");
   }
-  if (texture && texture == pxl__target(ctx)) {
+  if (pxl__samples_target(ctx, texture)) {
     return pxl__fail(ctx, "a texture cannot be drawn into itself");
   }
   if (ctx->state.clipped &&

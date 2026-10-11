@@ -50,6 +50,7 @@ static void counting_assert(bool condition) {
 #define PXL_ASSERT(condition) counting_assert(condition)
 #define PXL_IMPLEMENTATION
 #include "pxl.h"
+#include "test_shaders.h"
 
 #define PICO_UNIT_IMPLEMENTATION
 #include "pico_unit.h"
@@ -152,10 +153,43 @@ TEST_CASE(test_outside_of_a_frame) {
   return true;
 }
 
+// A draw cannot sample its target, in slot 0 or in a shader slot.
+TEST_CASE(test_draw_into_itself) {
+  failing_call     = 0;
+  failed_asserts   = 0;
+  pxl_context* pxl = pxl_create(&(pxl_desc){
+      .device = device,
+      .width  = 1,
+      .height = 1,
+  });
+  REQUIRE(pxl != nullptr);
+  pxl_shader* shader  = pxl_create_shader(pxl, &slots_frag);
+  pxl_texture* target = pxl_create_texture(
+      pxl, &(pxl_texture_desc){.width = 1, .height = 1, .render_target = true});
+  pxl_begin_frame(pxl);
+  pxl_set_target(pxl, target);
+  pxl_draw_sprite(pxl, target, &(pxl_sprite){});
+  bool sprite_failed = !pxl_end_frame(pxl);
+  pxl_begin_frame(pxl);
+  pxl_set_shader(pxl, shader);
+  pxl_set_shader_texture(pxl, 1, target);
+  pxl_set_target(pxl, target);
+  pxl_draw_rect(pxl, 0, 0, 1, 1, pxl_white);
+  bool rect_failed = !pxl_end_frame(pxl);
+  pxl_destroy_shader(pxl, shader);
+  pxl_destroy_texture(pxl, target);
+  pxl_destroy(pxl);
+  REQUIRE(shader && target);
+  REQUIRE(sprite_failed && rect_failed);
+  REQUIRE(failed_asserts == 2);
+  return true;
+}
+
 static TEST_SUITE(suite_options) {
   RUN_TEST_CASE(test_custom_allocator_and_assert);
   RUN_TEST_CASE(test_allocation_failures);
   RUN_TEST_CASE(test_outside_of_a_frame);
+  RUN_TEST_CASE(test_draw_into_itself);
 }
 
 int main() {
