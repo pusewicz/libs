@@ -1,0 +1,107 @@
+#!/bin/sh
+# Installs the tools and packages that CI uses, for the current OS.
+# Supported: Debian or Ubuntu (apt), macOS (Homebrew), Windows (MSYS2 CLANG64).
+#
+# Usage: bin/setup [-n]
+#   -n  Print the commands. Do not run them.
+#
+# CI runs this script, so the package lists here are the CI packages.
+
+set -eu
+
+# The format check needs this exact version, because versions format
+# differently.
+CLANG_FORMAT_VERSION=23.1.3
+
+dry_run=0
+case "${1:-}" in
+  "") ;;
+  -n) dry_run=1 ;;
+  *)
+    echo "Usage: bin/setup [-n]" >&2
+    exit 2
+    ;;
+esac
+
+die() {
+  echo "bin/setup: $*" >&2
+  exit 1
+}
+
+run() {
+  echo "+ $*"
+  if [ "$dry_run" -eq 0 ]; then
+    "$@"
+  fi
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    run "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    run sudo "$@"
+  else
+    die "root rights are needed. Run as root or install sudo."
+  fi
+}
+
+setup_debian() {
+  command -v apt-get >/dev/null 2>&1 || die "apt-get not found."
+
+  run_as_root apt-get update
+  # SDL3 is in Ubuntu 26.04 and newer. Older releases need a source build.
+  if [ "$dry_run" -eq 0 ] && ! apt-cache show libsdl3-dev >/dev/null 2>&1; then
+    die "libsdl3-dev is not in apt. Use Ubuntu 26.04 or newer, or build SDL3."
+  fi
+
+  # CI runs clang-tidy 22. Older releases may only have the default version.
+  clang_tidy=clang-tidy
+  if [ "$dry_run" -ne 0 ] || apt-cache show clang-tidy-22 >/dev/null 2>&1; then
+    clang_tidy=clang-tidy-22
+  fi
+
+  run_as_root apt-get install -y --no-install-recommends \
+    build-essential clang "$clang_tidy" libclang-rt-dev pkg-config ruby pipx \
+    libsdl3-dev mesa-vulkan-drivers vulkan-validationlayers \
+    glslc spirv-cross spirv-tools
+  run pipx install "clang-format==$CLANG_FORMAT_VERSION"
+
+  if [ "$clang_tidy" != clang-tidy ]; then
+    echo "Run rake with CLANG_TIDY=$clang_tidy, as CI does."
+  fi
+  echo "Run the GPU tests on lavapipe with SDL_VIDEO_DRIVER=offscreen."
+}
+
+setup_macos() {
+  command -v brew >/dev/null 2>&1 || die "Homebrew not found. See https://brew.sh."
+
+  run brew install llvm sdl3 pkgconf
+}
+
+setup_msys2() {
+  [ "${MSYSTEM:-}" = CLANG64 ] || die "Use the MSYS2 CLANG64 shell."
+
+  run pacman -S --needed --noconfirm \
+    "$MINGW_PACKAGE_PREFIX-clang" \
+    "$MINGW_PACKAGE_PREFIX-clang-tools-extra" \
+    "$MINGW_PACKAGE_PREFIX-compiler-rt" \
+    "$MINGW_PACKAGE_PREFIX-pkgconf" \
+    "$MINGW_PACKAGE_PREFIX-ruby" \
+    "$MINGW_PACKAGE_PREFIX-sdl3"
+}
+
+case "$(uname -s)" in
+  Linux)
+    # shellcheck disable=SC1091
+    . /etc/os-release 2>/dev/null || die "/etc/os-release not found."
+    case " ${ID:-} ${ID_LIKE:-} " in
+      *" debian "* | *" ubuntu "*) setup_debian ;;
+      *) die "Unsupported Linux: ${PRETTY_NAME:-unknown}. Needs apt." ;;
+    esac
+    ;;
+  Darwin) setup_macos ;;
+  MINGW* | MSYS*) setup_msys2 ;;
+  *) die "Unsupported OS: $(uname -s)." ;;
+esac
+
+echo "Done. Run rake check."
