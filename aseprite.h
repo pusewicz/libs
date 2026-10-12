@@ -1,7 +1,7 @@
 /*
  * aseprite.h - read Aseprite files (.ase, .aseprite).
  *
- * Version: 0.1.0
+ * Version: 0.2.0
  * SPDX-License-Identifier: Zlib
  * Copyright (c) 2026 Piotr Usewicz
  *
@@ -24,10 +24,16 @@
  *
  * Options. Define them before you include this file:
  *
- *   ASEPRITE_MALLOC(size)  Replace malloc. Define ASEPRITE_FREE also.
- *   ASEPRITE_FREE(pointer) Replace free. Define ASEPRITE_MALLOC also.
+ *   ASEPRITE_ALLOC(size, alignment)
+ *                          Replace malloc. Define ASEPRITE_FREE also.
+ *   ASEPRITE_FREE(pointer, size)
+ *                          Replace free. Define ASEPRITE_ALLOC also.
  *   ASEPRITE_ASSERT(expr)  Replace assert.
  *   ASEPRITE_NO_STDIO      Remove aseprite_load_file. Define it for all files.
+ *
+ * ASEPRITE_ALLOC gets a size above 0 and an alignment: a power of two, at most
+ * alignof(max_align_t). ASEPRITE_FREE gets a pointer, never nullptr, and the
+ * size that ASEPRITE_ALLOC got for it.
  *
  * File format:
  * https://github.com/aseprite/aseprite/blob/c9baf298a43c1e31ede7812392f80de155d5f6a2/docs/ase-file-specs.md
@@ -561,14 +567,14 @@ double aseprite_fixed_to_double(aseprite_fixed value);
 #include <stdckdint.h>
 #include <string.h>
 
-#if defined(ASEPRITE_MALLOC) != defined(ASEPRITE_FREE)
-#error "Define both ASEPRITE_MALLOC and ASEPRITE_FREE, or none of them"
+#if defined(ASEPRITE_ALLOC) != defined(ASEPRITE_FREE)
+#error "Define both ASEPRITE_ALLOC and ASEPRITE_FREE, or none of them"
 #endif
 
-#ifndef ASEPRITE_MALLOC
+#ifndef ASEPRITE_ALLOC
 #include <stdlib.h>
-#define ASEPRITE_MALLOC(size) malloc(size)
-#define ASEPRITE_FREE(pointer) free(pointer)
+#define ASEPRITE_ALLOC(size, alignment) ((void)(alignment), malloc(size))
+#define ASEPRITE_FREE(pointer, size) ((void)(size), free(pointer))
 #endif
 
 #ifndef ASEPRITE_ASSERT
@@ -633,11 +639,27 @@ typedef struct aseprite_arena {
   aseprite_block* head;
 } aseprite_arena;
 
-// Releases a list of blocks.
+// Calls ASEPRITE_ALLOC. Returns nullptr on failure.
+static void* aseprite_memory_alloc(size_t size, size_t alignment) {
+  ASEPRITE_ASSERT(size > 0);
+  ASEPRITE_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0);
+  ASEPRITE_ASSERT(alignment <= alignof(max_align_t));
+  return ASEPRITE_ALLOC(size, alignment);
+}
+
+// Calls ASEPRITE_FREE. The size is the size of the allocation.
+static void aseprite_memory_free(void* pointer, size_t size) {
+  ASEPRITE_ASSERT(pointer);
+  ASEPRITE_ASSERT(size > 0);
+  ASEPRITE_FREE(pointer, size);
+}
+
+// Releases a list of blocks. A block has the size that aseprite_new_block()
+// allocated: the head and the data.
 static void aseprite_arena_free(aseprite_block* block) {
   while (block) {
     aseprite_block* next = block->next;
-    ASEPRITE_FREE(block);
+    aseprite_memory_free(block, sizeof(aseprite_block) + block->size);
     block = next;
   }
 }
@@ -648,7 +670,7 @@ static aseprite_block* aseprite_new_block(size_t size) {
   if (ckd_add(&total, sizeof(aseprite_block), size)) {
     return nullptr;
   }
-  aseprite_block* block = ASEPRITE_MALLOC(total);
+  aseprite_block* block = aseprite_memory_alloc(total, alignof(aseprite_block));
   if (block) {
     block->next = nullptr;
     block->used = 0;
@@ -2675,14 +2697,16 @@ aseprite_result aseprite_load_file(const char* path, aseprite_sprite* sprite) {
     size = ftell(file);
   }
   if (size >= 0 && fseek(file, 0, SEEK_SET) == 0) {
-    uint8_t* data = ASEPRITE_MALLOC(size > 0 ? (size_t)size : 1);
+    // ASEPRITE_ALLOC does not accept size 0.
+    size_t buffer_size = size > 0 ? (size_t)size : 1;
+    uint8_t* data      = aseprite_memory_alloc(buffer_size, alignof(uint8_t));
     if (!data) {
       result = ASEPRITE_ERROR_NO_MEMORY;
     } else {
       if (fread(data, 1, (size_t)size, file) == (size_t)size) {
         result = aseprite_load_memory(data, (size_t)size, sprite);
       }
-      ASEPRITE_FREE(data);
+      aseprite_memory_free(data, buffer_size);
     }
   }
   (void)fclose(file);

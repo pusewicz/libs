@@ -1,6 +1,6 @@
 /*
  * pxl.h - a 2D renderer for pixel-art games, on top of SDL3 GPU.
- * Version 0.1.0
+ * Version 0.2.0
  * SPDX-License-Identifier: Zlib
  *
  * pxl draws sprites, shapes and text into a small canvas, then scales the
@@ -48,9 +48,13 @@
  *
  * Options. Define them before the implementation:
  *
- *   PXL_MALLOC, PXL_REALLOC, PXL_FREE  Replace SDL_malloc, SDL_realloc and
- *                                      SDL_free. Define all three or none.
- *   PXL_ASSERT                         Replaces SDL_assert.
+ *   PXL_ALLOC(size, alignment)  Replaces SDL_malloc. Define PXL_FREE also.
+ *   PXL_FREE(pointer, size)     Replaces SDL_free. Define PXL_ALLOC also.
+ *   PXL_ASSERT                  Replaces SDL_assert.
+ *
+ * PXL_ALLOC gets a size above 0 and an alignment: a power of two, at most
+ * alignof(max_align_t). PXL_FREE gets a pointer, never nullptr, and the size
+ * that PXL_ALLOC got for it.
  */
 
 #ifndef PXL_H
@@ -783,14 +787,13 @@ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size);
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(PXL_MALLOC) || defined(PXL_REALLOC) || defined(PXL_FREE)
-#if !defined(PXL_MALLOC) || !defined(PXL_REALLOC) || !defined(PXL_FREE)
-#error "Define all of PXL_MALLOC, PXL_REALLOC and PXL_FREE, or none."
+#if defined(PXL_ALLOC) != defined(PXL_FREE)
+#error "Define both PXL_ALLOC and PXL_FREE, or none."
 #endif
-#else
-#define PXL_MALLOC(size) SDL_malloc(size)
-#define PXL_REALLOC(pointer, size) SDL_realloc(pointer, size)
-#define PXL_FREE(pointer) SDL_free(pointer)
+
+#ifndef PXL_ALLOC
+#define PXL_ALLOC(size, alignment) ((void)(alignment), SDL_malloc(size))
+#define PXL_FREE(pointer, size) ((void)(size), SDL_free(pointer))
 #endif
 
 #ifndef PXL_ASSERT
@@ -2197,14 +2200,32 @@ struct pxl_context {
 // ---------------------------------------------------------------------------
 // Memory
 
+/** Calls PXL_ALLOC. Returns nullptr on failure. */
+[[nodiscard]] static void* pxl__memory_alloc(size_t size, size_t alignment) {
+  PXL_ASSERT(size > 0);
+  PXL_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0);
+  PXL_ASSERT(alignment <= alignof(max_align_t));
+  return PXL_ALLOC(size, alignment);
+}
+
+/** Calls PXL_FREE. The size is the size of the allocation. */
+static void pxl__memory_free(void* pointer, size_t size) {
+  PXL_ASSERT(pointer);
+  PXL_ASSERT(size > 0);
+  PXL_FREE(pointer, size);
+}
+
 /**
- * Grows an array to hold at least `needed` items.
+ * Grows an array to hold at least `needed` items. It allocates a new array,
+ * copies the items and frees the old array.
  *
+ * @param alignment The alignment of an item.
  * @return The new array, or nullptr. On success, *capacity is the new
- *         capacity. On failure, the old array stays valid.
+ *         capacity. On failure, the old array and *capacity stay valid.
  */
 [[nodiscard]] static void* pxl__grow(void* data, size_t item_size,
-                                     size_t needed, size_t capacity[static 1]) {
+                                     size_t alignment, size_t needed,
+                                     size_t capacity[static 1]) {
   if (needed <= *capacity) {
     return data;
   }
@@ -2218,11 +2239,24 @@ struct pxl_context {
   if (ckd_mul(&bytes, count, item_size)) {
     return nullptr;
   }
-  void* grown = PXL_REALLOC(data, bytes);
-  if (grown) {
-    *capacity = count;
+  void* grown = pxl__memory_alloc(bytes, alignment);
+  if (!grown) {
+    return nullptr;
   }
+  if (data) {
+    size_t old_bytes = *capacity * item_size;
+    memcpy(grown, data, old_bytes);
+    pxl__memory_free(data, old_bytes);
+  }
+  *capacity = count;
   return grown;
+}
+
+/** Frees an array from pxl__grow(), if there is one. */
+static void pxl__free_array(void* data, size_t item_size, size_t capacity) {
+  if (data) {
+    pxl__memory_free(data, capacity * item_size);
+  }
 }
 
 /** Marks the frame as failed. Returns false. */
@@ -2432,8 +2466,8 @@ static SDL_GPUGraphicsPipeline* pxl__get_pipeline(pxl_context* ctx,
     }
   }
   pxl__pipeline* pipelines =
-      pxl__grow(ctx->pipelines, sizeof *ctx->pipelines, ctx->pipeline_count + 1,
-                &ctx->pipeline_capacity);
+      pxl__grow(ctx->pipelines, sizeof(pxl__pipeline), alignof(pxl__pipeline),
+                ctx->pipeline_count + 1, &ctx->pipeline_capacity);
   if (!pipelines) {
     SDL_OutOfMemory();
     return nullptr;
@@ -2694,7 +2728,7 @@ static bool pxl__clear_now(pxl_context* ctx, pxl_texture* texture) {
 
 static void pxl__free_texture(pxl_context* ctx, pxl_texture* texture) {
   SDL_ReleaseGPUTexture(ctx->device, texture->handle);
-  PXL_FREE(texture);
+  pxl__memory_free(texture, sizeof(pxl_texture));
 }
 
 static pxl_texture* pxl__create_texture(pxl_context* ctx,
@@ -2704,7 +2738,8 @@ static pxl_texture* pxl__create_texture(pxl_context* ctx,
     SDL_SetError("pxl: the texture size must be positive");
     return nullptr;
   }
-  pxl_texture* texture = PXL_MALLOC(sizeof *texture);
+  pxl_texture* texture =
+      pxl__memory_alloc(sizeof(pxl_texture), alignof(pxl_texture));
   if (!texture) {
     SDL_OutOfMemory();
     return nullptr;
@@ -2732,7 +2767,7 @@ static pxl_texture* pxl__create_texture(pxl_context* ctx,
                        .num_levels           = 1,
                    });
   if (!texture->handle) {
-    PXL_FREE(texture);
+    pxl__memory_free(texture, sizeof(pxl_texture));
     return nullptr;
   }
   bool filled = desc->render_target && !desc->pixels
@@ -2912,7 +2947,7 @@ SDL_GPUTexture* pxl_texture_handle(const pxl_texture* texture) {
 static void pxl__free_shader(pxl_context* ctx, pxl_shader* shader) {
   pxl__release_pipelines(ctx, shader->handle);
   SDL_ReleaseGPUShader(ctx->device, shader->handle);
-  PXL_FREE(shader);
+  pxl__memory_free(shader, sizeof(pxl_shader));
 }
 
 pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
@@ -2922,7 +2957,8 @@ pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
     SDL_SetError("pxl: too many shader textures");
     return nullptr;
   }
-  pxl_shader* shader = PXL_MALLOC(sizeof *shader);
+  pxl_shader* shader =
+      pxl__memory_alloc(sizeof(pxl_shader), alignof(pxl_shader));
   if (!shader) {
     SDL_OutOfMemory();
     return nullptr;
@@ -2936,7 +2972,7 @@ pxl_shader* pxl_create_shader(pxl_context* ctx, const pxl_shader_desc* desc) {
       pxl__select_code(ctx, &desc->spirv, &desc->dxil, &desc->msl),
       num_textures, desc->has_uniforms ? 1 : 0);
   if (!shader->handle) {
-    PXL_FREE(shader);
+    pxl__memory_free(shader, sizeof(pxl_shader));
     return nullptr;
   }
   return shader;
@@ -3103,7 +3139,8 @@ pxl_context* pxl_create(const pxl_desc* desc) {
     SDL_SetError("pxl: a context without a window needs a canvas size");
     return nullptr;
   }
-  pxl_context* ctx = PXL_MALLOC(sizeof *ctx);
+  pxl_context* ctx =
+      pxl__memory_alloc(sizeof(pxl_context), alignof(pxl_context));
   if (!ctx) {
     SDL_OutOfMemory();
     return nullptr;
@@ -3197,12 +3234,13 @@ void pxl_destroy(pxl_context* ctx) {
   if (ctx->claimed_window) {
     SDL_ReleaseWindowFromGPUDevice(ctx->device, ctx->window);
   }
-  PXL_FREE(ctx->pipelines);
-  PXL_FREE(ctx->vertices);
-  PXL_FREE(ctx->indices);
-  PXL_FREE(ctx->commands);
-  PXL_FREE(ctx->uniforms);
-  PXL_FREE(ctx);
+  pxl__free_array(ctx->pipelines, sizeof(pxl__pipeline),
+                  ctx->pipeline_capacity);
+  pxl__free_array(ctx->vertices, sizeof(pxl__vertex), ctx->vertex_capacity);
+  pxl__free_array(ctx->indices, sizeof(uint32_t), ctx->index_capacity);
+  pxl__free_array(ctx->commands, sizeof(pxl__command), ctx->command_capacity);
+  pxl__free_array(ctx->uniforms, 1, ctx->uniform_capacity);
+  pxl__memory_free(ctx, sizeof(pxl_context));
 }
 
 pxl_texture* pxl_get_canvas(const pxl_context* ctx) {
@@ -3364,7 +3402,8 @@ bool pxl_set_uniforms(pxl_context* ctx, const void* data, size_t size) {
   if (ckd_add(&end, offset, size) || size > UINT32_MAX) {
     return pxl__fail(ctx, "uniforms too large");
   }
-  uint8_t* uniforms = pxl__grow(ctx->uniforms, 1, end, &ctx->uniform_capacity);
+  uint8_t* uniforms =
+      pxl__grow(ctx->uniforms, 1, 1, end, &ctx->uniform_capacity);
   if (!uniforms) {
     return pxl__fail(ctx, "out of memory");
   }
@@ -3438,8 +3477,8 @@ static pxl__command* pxl__draw_command(pxl_context* ctx,
     return last;
   }
   pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
+      pxl__grow(ctx->commands, sizeof(pxl__command), alignof(pxl__command),
+                ctx->command_count + 1, &ctx->command_capacity);
   if (!commands) {
     return nullptr;
   }
@@ -3464,14 +3503,16 @@ static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
       vertices > UINT32_MAX || indices > UINT32_MAX) {
     return pxl__fail(ctx, "too many vertices");
   }
-  pxl__vertex* grown_vertices = pxl__grow(ctx->vertices, sizeof *ctx->vertices,
-                                          vertices, &ctx->vertex_capacity);
+  pxl__vertex* grown_vertices =
+      pxl__grow(ctx->vertices, sizeof(pxl__vertex), alignof(pxl__vertex),
+                vertices, &ctx->vertex_capacity);
   if (!grown_vertices) {
     return pxl__fail(ctx, "out of memory");
   }
-  ctx->vertices           = grown_vertices;
-  uint32_t* grown_indices = pxl__grow(ctx->indices, sizeof *ctx->indices,
-                                      indices, &ctx->index_capacity);
+  ctx->vertices = grown_vertices;
+  uint32_t* grown_indices =
+      pxl__grow(ctx->indices, sizeof(uint32_t), alignof(uint32_t), indices,
+                &ctx->index_capacity);
   if (!grown_indices) {
     return pxl__fail(ctx, "out of memory");
   }
@@ -3610,8 +3651,8 @@ static pxl_vec2 pxl__vertex_position(const pxl_context* ctx, float x, float y) {
 void pxl_clear(pxl_context* ctx, pxl_color color) {
   PXL_ASSERT(ctx && ctx->in_frame);
   pxl__command* commands =
-      pxl__grow(ctx->commands, sizeof *ctx->commands, ctx->command_count + 1,
-                &ctx->command_capacity);
+      pxl__grow(ctx->commands, sizeof(pxl__command), alignof(pxl__command),
+                ctx->command_count + 1, &ctx->command_capacity);
   if (!commands) {
     pxl__fail(ctx, "out of memory");
     return;
@@ -4023,7 +4064,7 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
     SDL_SetError("pxl: the font texture is too small");
     return nullptr;
   }
-  pxl_font* font = PXL_MALLOC(sizeof *font);
+  pxl_font* font = pxl__memory_alloc(sizeof(pxl_font), alignof(pxl_font));
   if (!font) {
     SDL_OutOfMemory();
     return nullptr;
@@ -4039,15 +4080,23 @@ pxl_font* pxl_create_font(pxl_context* ctx, const pxl_font_desc* desc) {
       .count = count,
   };
   if (desc->advances) {
-    font->advances = PXL_MALLOC(count);
+    font->advances = pxl__memory_alloc(count, alignof(uint8_t));
     if (!font->advances) {
-      PXL_FREE(font);
+      pxl__memory_free(font, sizeof(pxl_font));
       SDL_OutOfMemory();
       return nullptr;
     }
     memcpy(font->advances, desc->advances, count);
   }
   return font;
+}
+
+/** Frees a font and its advances. It does not free the texture. */
+static void pxl__free_font(pxl_font* font) {
+  if (font->advances) {
+    pxl__memory_free(font->advances, font->count);
+  }
+  pxl__memory_free(font, sizeof(pxl_font));
 }
 
 void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
@@ -4067,8 +4116,7 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
   if (font->owns_texture) {
     pxl_destroy_texture(ctx, font->texture);
   }
-  PXL_FREE(font->advances);
-  PXL_FREE(font);
+  pxl__free_font(font);
 }
 
 /** Frees the built-in font now. */
@@ -4076,8 +4124,7 @@ static void pxl__free_default_font(pxl_context* ctx) {
   pxl_font* font = ctx->default_font;
   if (font) {
     pxl__free_texture(ctx, font->texture);
-    PXL_FREE(font->advances);
-    PXL_FREE(font);
+    pxl__free_font(font);
     ctx->default_font = nullptr;
   }
 }
@@ -4095,7 +4142,7 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   static_assert(count <= (size_t)pxl__font_grid_columns * pxl__font_grid_rows);
 
   constexpr size_t size = sizeof(pxl_color) * (size_t)width * (size_t)height;
-  pxl_color* pixels     = PXL_MALLOC(size);
+  pxl_color* pixels     = pxl__memory_alloc(size, alignof(pxl_color));
   if (!pixels) {
     SDL_OutOfMemory();
     return nullptr;
@@ -4116,7 +4163,7 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
   pxl_texture* texture = pxl_create_texture(
       ctx,
       &(pxl_texture_desc){.width = width, .height = height, .pixels = pixels});
-  PXL_FREE(pixels);
+  pxl__memory_free(pixels, size);
   if (!texture) {
     return nullptr;
   }
@@ -4140,12 +4187,15 @@ static pxl_font* pxl__create_default_font(pxl_context* ctx) {
 /**
  * Formats text into `buffer`, or into new memory if `buffer` is too small.
  *
- * @return The text, or nullptr. Free it with PXL_FREE() if it is not
- *         `buffer`.
+ * @param allocated Gets the size of the new memory, or 0 if the text is in
+ *                  `buffer` or the format fails.
+ * @return The text, or nullptr. If `*allocated` is not 0, free the text with
+ *         pxl__memory_free() and that size.
  */
 PXL_PRINTF(3, 0)
 static char* pxl__vformat(char* buffer, size_t size, const char* format,
-                          va_list args) {
+                          va_list args, size_t allocated[static 1]) {
+  *allocated = 0;
   va_list copy;
   va_copy(copy, args);
   int length = SDL_vsnprintf(buffer, size, format, copy);
@@ -4156,9 +4206,10 @@ static char* pxl__vformat(char* buffer, size_t size, const char* format,
   if ((size_t)length < size) {
     return buffer;
   }
-  char* text = PXL_MALLOC((size_t)length + 1);
+  char* text = pxl__memory_alloc((size_t)length + 1, alignof(char));
   if (text) {
     SDL_vsnprintf(text, (size_t)length + 1, format, args);
+    *allocated = (size_t)length + 1;
   }
   return text;
 }
@@ -4269,26 +4320,28 @@ void pxl_draw_text(pxl_context* ctx, float x, float y, pxl_color color,
                    const char* format, ...) {
   PXL_ASSERT(ctx && format);
   char buffer[pxl__format_buffer];
+  size_t allocated = 0;
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  char* text = pxl__vformat(buffer, sizeof buffer, format, args, &allocated);
   va_end(args);
   if (!text) {
     pxl__fail(ctx, "cannot format the text");
     return;
   }
   pxl__draw_string(ctx, x, y, color, text);
-  if (text != buffer) {
-    PXL_FREE(text);
+  if (allocated > 0) {
+    pxl__memory_free(text, allocated);
   }
 }
 
 pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
   PXL_ASSERT(ctx && format);
   char buffer[pxl__format_buffer];
+  size_t allocated = 0;
   va_list args;
   va_start(args, format);
-  char* text = pxl__vformat(buffer, sizeof buffer, format, args);
+  char* text = pxl__vformat(buffer, sizeof buffer, format, args, &allocated);
   va_end(args);
   if (!text) {
     return (pxl_vec2){};
@@ -4310,8 +4363,8 @@ pxl_vec2 pxl_measure_text(const pxl_context* ctx, const char* format, ...) {
       width = fmaxf(width, line);
     }
   }
-  if (text != buffer) {
-    PXL_FREE(text);
+  if (allocated > 0) {
+    pxl__memory_free(text, allocated);
   }
   return (pxl_vec2){
       .x = width,
