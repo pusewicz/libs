@@ -65,26 +65,42 @@ TEST_CASE(test_transforms) {
 }
 
 TEST_CASE(test_fit) {
-  bool exact = false;
-  pxl_rect r = pxl__fit(320, 180, 1280, 720, PXL_SCALE_INTEGER, &exact);
+  pxl_rect r = pxl__fit(320, 180, 1280, 720, PXL_SCALE_INTEGER);
   REQUIRE(r.x == 0.0f && r.y == 0.0f && r.w == 1280.0f && r.h == 720.0f);
-  REQUIRE(exact);
+  REQUIRE(pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_INTEGER, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_INTEGER);
   REQUIRE(r.x == 20.0f && r.y == 80.0f && r.w == 960.0f && r.h == 540.0f);
-  REQUIRE(exact);
+  REQUIRE(pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_FIT, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_FIT);
   REQUIRE(r.x == 0.0f && r.y == 68.0f && r.w == 1000.0f && r.h == 563.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_STRETCH, &exact);
+  r = pxl__fit(320, 180, 1000, 700, PXL_SCALE_STRETCH);
   REQUIRE(r.x == 0.0f && r.y == 0.0f && r.w == 1000.0f && r.h == 700.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
 
-  r = pxl__fit(320, 180, 200, 100, PXL_SCALE_INTEGER, &exact);
+  r = pxl__fit(320, 180, 960, 540, PXL_SCALE_STRETCH);
+  REQUIRE(pxl__is_exact(r, 320, 180));
+
+  r = pxl__fit(320, 180, 960, 360, PXL_SCALE_STRETCH);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
+
+  r = pxl__fit(320, 180, 200, 100, PXL_SCALE_INTEGER);
   REQUIRE(r.w < 200.5f && r.h <= 100.0f);
-  REQUIRE(!exact);
+  REQUIRE(!pxl__is_exact(r, 320, 180));
+  return true;
+}
+
+TEST_CASE(test_fail) {
+  static pxl_context ctx = {};
+  SDL_SetError("the GPU failed");
+  REQUIRE(!pxl__fail_sdl(&ctx));
+  REQUIRE(ctx.failed);
+  REQUIRE(strcmp(SDL_GetError(), "the GPU failed") == 0);
+  REQUIRE(!pxl__fail(&ctx, "out of memory"));
+  REQUIRE(strcmp(SDL_GetError(), "pxl: out of memory") == 0);
   return true;
 }
 
@@ -574,6 +590,37 @@ TEST_CASE(test_destroy_during_frame) {
   return true;
 }
 
+// Destroyed resources leave the draw state and the saved states.
+TEST_CASE(test_destroy_in_state) {
+  pxl_texture* target = pxl_create_texture(
+      gpu.pxl,
+      &(pxl_texture_desc){.width = 4, .height = 4, .render_target = true});
+  pxl_shader* shader  = pxl_create_shader(gpu.pxl, &slots_frag);
+  pxl_texture* glyphs = own_texture(quad_texture(gpu.pxl));
+  pxl_font* font      = pxl_create_font(
+      gpu.pxl,
+      &(pxl_font_desc){.texture = glyphs, .glyph_width = 1, .glyph_height = 1});
+  pxl_begin_frame(gpu.pxl);
+  pxl_set_target(gpu.pxl, target);
+  pxl_set_shader(gpu.pxl, shader);
+  pxl_set_shader_texture(gpu.pxl, 1, target);
+  pxl_set_font(gpu.pxl, font);
+  pxl_push(gpu.pxl);
+  pxl_destroy_texture(gpu.pxl, target);
+  pxl_destroy_shader(gpu.pxl, shader);
+  pxl_destroy_font(gpu.pxl, font);
+  REQUIRE(target && shader && font);
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  pxl_pop(gpu.pxl);
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  REQUIRE(pxl_measure_text(gpu.pxl, "A").x == 6.0f);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_draw_rect(gpu.pxl, 0, 0, 1, 1, red);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(0, 0), red, 0));
+  return true;
+}
+
 TEST_CASE(test_measure_text) {
   pxl_vec2 size = pxl_measure_text(gpu.pxl, "Hi");
   REQUIRE(size.x == 8.0f && size.y == 10.0f);
@@ -585,6 +632,13 @@ TEST_CASE(test_measure_text) {
   REQUIRE(size.x == 12.0f);
   size = pxl_measure_text(gpu.pxl, "%300s", "a");
   REQUIRE(size.x == (299.0f * 4.0f) + 6.0f);
+  size = pxl_measure_text(gpu.pxl, "a%cb", 0);
+  REQUIRE(size.x == 6.0f && size.y == 10.0f);
+  size = pxl_measure_text(gpu.pxl, "a\xe2");
+  REQUIRE(size.x == 12.0f);
+  // U+20000 is one code point, so one '?'.
+  size = pxl_measure_text(gpu.pxl, "\xf0\xa0\x80\x80");
+  REQUIRE(size.x == 6.0f);
   return true;
 }
 
@@ -640,6 +694,15 @@ TEST_CASE(test_custom_font) {
   pxl_set_font(gpu.pxl, font);
   pxl_draw_text(gpu.pxl, 0, 0, pxl_white, "ABAz");
   REQUIRE(pxl_measure_text(gpu.pxl, "AB").x == 4.0f);
+  pxl_font* icons = own_font(pxl_create_font(gpu.pxl, &(pxl_font_desc){
+                                                          .texture = texture,
+                                                          .glyph_width  = 2,
+                                                          .glyph_height = 2,
+                                                          .first = 0xf0001,
+                                                      }));
+  REQUIRE(icons != nullptr);
+  pxl_set_font(gpu.pxl, icons);
+  REQUIRE(pxl_measure_text(gpu.pxl, "\xf3\xb0\x80\x81").x == 2.0f);
   pxl_set_font(gpu.pxl, nullptr);
   REQUIRE(pxl_measure_text(gpu.pxl, "AB").x == 12.0f);
   REQUIRE(finish());
@@ -683,6 +746,33 @@ TEST_CASE(test_custom_shader) {
   return true;
 }
 
+// The slots shader ignores v_params.x. A plain color draw after a sprite
+// must not sample the texture of the sprite.
+TEST_CASE(test_custom_shader_plain_color) {
+  pxl_shader* shader = own_shader(pxl_create_shader(gpu.pxl, &slots_frag));
+  pxl_texture* extra = own_texture(pxl_create_texture(
+      gpu.pxl, &(pxl_texture_desc){.width = 1, .height = 1, .pixels = &green}));
+  pxl_texture* clear =
+      own_texture(pxl_create_texture(gpu.pxl, &(pxl_texture_desc){
+                                                  .width  = 1,
+                                                  .height = 1,
+                                                  .pixels = &pxl_transparent,
+                                              }));
+  REQUIRE(shader && extra && clear);
+  const float add_red[] = {1.0f, 0.0f, 0.0f, 0.0f};
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_set_shader(gpu.pxl, shader);
+  pxl_set_shader_texture(gpu.pxl, 1, extra);
+  REQUIRE(pxl_set_uniforms(gpu.pxl, add_red, sizeof add_red));
+  pxl_draw_sprite(gpu.pxl, clear, &(pxl_sprite){.x = 8, .y = 8});
+  pxl_draw_rect(gpu.pxl, 0, 0, 4, 4, pxl_white);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(0, 0), (pxl_color){255, 255, 0, 255}, 0));
+  REQUIRE(same_color(pixel_at(8, 8), pxl_black, 0));
+  return true;
+}
+
 /** Ends the frame into a screen texture and reads the screen. */
 static bool present(pxl_texture* screen, pxl_color* pixels) {
   SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device);
@@ -706,11 +796,14 @@ TEST_CASE(test_present) {
   static pxl_color pixels[(size_t)w * h];
   REQUIRE(screen != nullptr);
 
-  // Scale 1, in the middle.
+  // Scale 1, in the middle. The draw state stays after the frame.
   pxl_begin_frame(gpu.pxl);
   pxl_clear(gpu.pxl, red);
   pxl_draw_pixel(gpu.pxl, 0, 0, pxl_white);
+  pxl_translate(gpu.pxl, 3.0f, 0.0f);
   REQUIRE(present(screen, pixels));
+  REQUIRE(pxl_get_width(gpu.pxl) == canvas_size);
+  REQUIRE(pxl_get_transform(gpu.pxl).tx == 3.0f);
   pxl_rect v = pxl_get_viewport(gpu.pxl);
   REQUIRE(v.x == 12 && v.y == 4 && v.w == 16 && v.h == 16);
   REQUIRE(same_color(pixels[(4 * w) + 12], pxl_white, 0));
@@ -841,6 +934,7 @@ static TEST_SUITE(suite_cpu) {
   RUN_TEST_CASE(test_colors);
   RUN_TEST_CASE(test_transforms);
   RUN_TEST_CASE(test_fit);
+  RUN_TEST_CASE(test_fail);
   RUN_TEST_CASE(test_circle_spans);
 }
 
@@ -862,10 +956,12 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_update_texture);
   RUN_TEST_CASE(test_batching);
   RUN_TEST_CASE(test_destroy_during_frame);
+  RUN_TEST_CASE(test_destroy_in_state);
   RUN_TEST_CASE(test_measure_text);
   RUN_TEST_CASE(test_draw_text);
   RUN_TEST_CASE(test_custom_font);
   RUN_TEST_CASE(test_custom_shader);
+  RUN_TEST_CASE(test_custom_shader_plain_color);
   RUN_TEST_CASE(test_present);
   RUN_TEST_CASE(test_load_texture);
   RUN_TEST_CASE(test_create_errors);

@@ -48,17 +48,17 @@ module Pxl
   end
 end
 
-%w[glslc spirv-cross spirv-val].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
+%w[glslc spirv-cross spirv-opt spirv-val].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
 BANNER_ROWS["DXC"] = -> { Pxl.describe_dxc }
 
 namespace :pxl do
   desc "Compile the built-in shaders and embed them in pxl.h"
   task :shaders do
     sources = FileList[File.join(Pxl::TOOLS_DIR, "shaders", "*.{vert,frag}")].sort
-    arrays = sources.map do |source|
-      PxlShaders.c_arrays("pxl__#{PxlShaders.c_name(source)}", PxlShaders.compile(source, Pxl::WORK_DIR, Pxl.dxc))
+    shaders = sources.map do |source|
+      PxlShaders.c_shader("pxl__#{PxlShaders.c_name(source)}", PxlShaders.compile(source, Pxl::WORK_DIR, Pxl.dxc))
     end
-    Pxl.splice("SHADERS", "// clang-format off\n#{arrays.join}// clang-format on\n")
+    Pxl.splice("SHADERS", "// clang-format off\n#{shaders.join("\n")}// clang-format on\n")
   end
 
   desc "Embed the built-in font in pxl.h"

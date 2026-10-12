@@ -63,6 +63,6 @@ uses clang-format 23. The Shaders job checks that the generated files are
 up to date.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
-font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it
-downloads the DXC release for Linux. It runs it directly on Linux x86_64, and
-in Docker on macOS.
+font. It needs glslc, spirv-cross, spirv-opt and spirv-val. If DXC is not in
+PATH, it downloads the DXC release for Linux. It runs it directly on Linux
+x86_64, and in Docker on macOS.

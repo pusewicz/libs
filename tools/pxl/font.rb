@@ -55,6 +55,8 @@ module PxlFont
     end
     <<~C
       // clang-format off
+      constexpr int pxl__font_width = #{WIDTH};
+      constexpr int pxl__font_height = #{HEIGHT};
       static const uint8_t pxl__font_rows[#{COUNT}][#{HEIGHT}] = {
       #{bitmaps.join("\n")}
       };
