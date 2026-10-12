@@ -14,6 +14,9 @@ All libraries use the [zlib license](LICENSE).
 pxl draws into a small canvas, for example 320 x 180, and scales it to the
 window without blur. It needs SDL 3.2 or newer.
 
+Try it in the [playground](https://pusewicz.github.io/libs/pxl/): edit the
+code on the left, and the browser compiles it and runs it on the right.
+
 ```c
 pxl_context* pxl = pxl_create(&(pxl_desc){
     .device = device, .window = window, .width = 320, .height = 180});
@@ -39,6 +42,28 @@ pxl_end_frame(pxl);
 - PNG and BMP loading, and texture read-back for screenshots.
 
 See [`examples/pxl/`](examples/pxl/) and the comments in `pxl.h`.
+
+### Playground
+
+The [playground](https://pusewicz.github.io/libs/pxl/) compiles C with pxl.h
+in the browser, as you type, and runs the program next to the code. A program
+that does not compile shows its errors, and the last good program keeps
+running. GitHub Pages hosts it: the Pages workflow tests it and deploys it
+from `main`.
+
+- Clang and LLD in WebAssembly ([YoWASP](https://yowasp.org/)) compile the
+  code into a side module. The first visit downloads about 26 MB.
+- An Emscripten build of SDL and pxl.h loads the side module and runs it.
+- SDL has no GPU backend for the web, so
+  [`playground/pxl/gpu.c`](playground/pxl/gpu.c) implements the SDL GPU API
+  on WebGL 2. It translates SPIR-V shaders to GLSL ES with SPIRV-Cross. The
+  tests of pxl pass on it.
+
+Limits: programs use the SDL main callbacks (`SDL_MAIN_USE_CALLBACKS`). The
+playground has the implementation of pxl.h already, so `PXL_IMPLEMENTATION`
+and the options of pxl.h have no effect. There are no files to load. The GPU
+layer has no compute, storage buffers or textures, indirect draws, textures
+that are not 2D, or multisampling.
 
 | Backend | Status |
 | --- | --- |
@@ -66,3 +91,9 @@ up to date.
 font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it
 downloads the DXC release for Linux. It runs it directly on Linux x86_64, and
 in Docker on macOS.
+
+`rake pxl:playground` builds the playground into `build/playground/site`. It
+needs Emscripten 6.0.12 (`emcc` in PATH), Node.js 22 and git. Then
+`rake pxl:playground:serve` serves it on http://localhost:8000/pxl/, and
+`rake pxl:playground:test` runs the tests of pxl and of the playground in
+headless Chromium.
