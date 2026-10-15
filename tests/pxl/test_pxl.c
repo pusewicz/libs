@@ -88,23 +88,6 @@ TEST_CASE(test_fit) {
   return true;
 }
 
-TEST_CASE(test_circle_spans) {
-  REQUIRE(pxl__circle_span(0, 0) == 0);
-  REQUIRE(pxl__circle_span(0, 1) == -1);
-  REQUIRE(pxl__circle_span(2, 0) == 2);
-  REQUIRE(pxl__circle_span(2, 1) == 2);
-  REQUIRE(pxl__circle_span(2, -2) == 1);
-  REQUIRE(pxl__circle_span(2, 3) == -1);
-  for (int r = 0; r < 200; ++r) {
-    for (int dy = -r; dy <= r; ++dy) {
-      int half = pxl__circle_span(r, dy);
-      REQUIRE((half * half) + (dy * dy) <= r * (r + 1));
-      REQUIRE(((half + 1) * (half + 1)) + (dy * dy) > r * (r + 1));
-    }
-  }
-  return true;
-}
-
 // ---------------------------------------------------------------------------
 // GPU tests
 
@@ -521,6 +504,17 @@ TEST_CASE(test_circle_quad) {
   // The corners of the quad are outside of the circle. They keep their color.
   REQUIRE(same_color(pixel_at(1, 1), blue, 0));
   REQUIRE(same_color(pixel_at(13, 13), blue, 0));
+
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, blue);
+  pxl_set_blend(gpu.pxl, PXL_BLEND_NONE);
+  pxl_draw_circle_lines(gpu.pxl, 7, 7, 6, red);
+  REQUIRE(finish());
+  stats = pxl_get_stats(gpu.pxl);
+  REQUIRE(stats.vertices == 4 && stats.indices == 6);
+  REQUIRE(same_color(pixel_at(7, 1), red, 0));
+  REQUIRE(same_color(pixel_at(7, 7), blue, 0));
+  REQUIRE(same_color(pixel_at(1, 1), blue, 0));
   return true;
 }
 
@@ -983,7 +977,6 @@ static TEST_SUITE(suite_cpu) {
   RUN_TEST_CASE(test_colors);
   RUN_TEST_CASE(test_transforms);
   RUN_TEST_CASE(test_fit);
-  RUN_TEST_CASE(test_circle_spans);
 }
 
 static TEST_SUITE(suite_gpu) {

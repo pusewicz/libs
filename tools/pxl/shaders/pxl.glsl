@@ -23,7 +23,8 @@ layout(location = 4) in vec4 v_shape;
 
 // The shape kinds. Keep them as pxl__shape in pxl.h.
 const int PXL_SHAPE_NONE   = 0;
-const int PXL_SHAPE_CIRCLE = 1; // v_shape.x: the radius.
+// v_shape.x: the radius. v_shape.y: the width of the outline, or 0 to fill.
+const int PXL_SHAPE_CIRCLE = 1;
 
 // Rounds to a whole number. Use it for values that must be whole numbers:
 // interpolation can add a small error to them.
@@ -47,8 +48,18 @@ float pxl_shape_coverage() {
   int kind = pxl_whole(v_params.z * 255.0);
   if (kind == PXL_SHAPE_CIRCLE) {
     // The origin is the center of the center pixel, so v_uv is a whole
-    // number at each pixel center.
-    return pxl_in_circle(pxl_whole(v_uv), pxl_whole(v_shape.x)) ? 1.0 : 0.0;
+    // number at each pixel center. The circle is symmetric: use |v_uv|.
+    ivec2 p     = abs(pxl_whole(v_uv));
+    int radius  = pxl_whole(v_shape.x);
+    int width   = pxl_whole(v_shape.y);
+    bool inside = pxl_in_circle(p, radius);
+    if (width > 0) {
+      // A pixel is on the outline if a pixel `width` steps away in x or y is
+      // outside. Only the steps away from the center can reach outside.
+      inside = inside && (!pxl_in_circle(p + ivec2(width, 0), radius) ||
+                          !pxl_in_circle(p + ivec2(0, width), radius));
+    }
+    return inside ? 1.0 : 0.0;
   }
   return 1.0;
 }
