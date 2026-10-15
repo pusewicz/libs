@@ -5,10 +5,7 @@
 //
 // Slot 1 holds the palettes: four texels wide, one palette in each row.
 
-layout(location = 0) in vec2 v_uv;
-layout(location = 1) in vec4 v_color;
-layout(location = 2) in vec4 v_overlay;
-layout(location = 3) in vec4 v_params;
+#include "pxl.glsl"
 
 layout(location = 0) out vec4 o_color;
 
@@ -32,5 +29,5 @@ void main() {
   float shade = min(floor(luma * 4.0), 3.0);
   vec2 cells  = vec2(textureSize(u_palettes, 0));
   vec3 color  = texture(u_palettes, (vec2(shade, u_palette) + 0.5) / cells).rgb;
-  o_color     = vec4(color, 1.0) * texel.a * v_color.a;
+  o_color     = pxl_cover(vec4(color, 1.0) * texel.a * v_color.a);
 }

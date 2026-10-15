@@ -5,6 +5,9 @@
 #
 #   ruby tools/pxl/shaders.rb -o my_shaders.h wave.frag palette.frag
 #
+# Each shader includes pxl.glsl, which declares the inputs. The compiler
+# finds it in tools/pxl/shaders/.
+#
 # The header has one pxl_shader_desc for each shader, for example
 # `wave_frag`. Include pxl.h before it:
 #
@@ -28,7 +31,8 @@ module PxlShaders
   DXC_SHA256 = "96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1"
   DXC_DOCKER_IMAGE = "ubuntu:24.04"
   MAX_TEXTURES = 4
-  FRAGMENT_INPUTS = { 0 => "vec2", 1 => "vec4", 2 => "vec4", 3 => "vec4" }.freeze
+  FRAGMENT_INPUTS = { 0 => "vec2", 1 => "vec4", 2 => "vec4", 3 => "vec4", 4 => "vec4" }.freeze
+  INCLUDE_DIR = File.join(__dir__, "shaders")
 
   module_function
 
@@ -129,7 +133,7 @@ module PxlShaders
     inputs = reflection.fetch("inputs", []).to_h { |input| [input["location"], input["type"]] }
     return if inputs == FRAGMENT_INPUTS
 
-    abort("#{source}: declare the inputs of tools/pxl/shaders/sprite.frag: " \
+    abort("#{source}: include pxl.glsl and do not declare other inputs. pxl.glsl declares " \
           "#{FRAGMENT_INPUTS.map { |location, type| "#{type} at location #{location}" }.join(', ')}")
   end
 
@@ -140,7 +144,7 @@ module PxlShaders
     stage = File.extname(source) == ".vert" ? "vs" : "ps"
     base = File.expand_path(File.join(work_dir, File.basename(source)))
     spirv = "#{base}.spv"
-    run("glslc", "--target-env=vulkan1.0", "-o", spirv, source)
+    run("glslc", "--target-env=vulkan1.0", "-I", INCLUDE_DIR, "-o", spirv, source)
     run("spirv-val", spirv)
     counts = check_bindings(source, JSON.parse(run("spirv-cross", spirv, "--reflect")), stage)
     run("spirv-cross", spirv, "--msl", "--msl-version", "20100", "--msl-decoration-binding",
