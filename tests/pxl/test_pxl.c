@@ -397,6 +397,118 @@ TEST_CASE(test_circles) {
   return true;
 }
 
+static constexpr int circle_target_size = 64;
+
+/** A circle to draw, and the circle in target pixels that pxl must draw. */
+typedef struct circle_case {
+  /** The arguments of the draw. */
+  struct {
+    float x, y, radius;
+  } draw;
+  /** The scale of the transform. 0: no transform. */
+  float scale;
+  /** The center pixel and the radius. A negative radius: no circle. */
+  struct {
+    int x, y, radius;
+  } want;
+} circle_case;
+
+/** Checks a pixel against the rule of pxl_draw_circle(). */
+static bool in_circle(int64_t dx, int64_t dy, int64_t radius) {
+  return radius >= 0 && (dx * dx) + (dy * dy) <= radius * (radius + 1);
+}
+
+/** Checks a pixel against the rule of pxl_draw_circle_lines(). */
+static bool on_circle(int64_t dx, int64_t dy, int64_t radius) {
+  return in_circle(dx, dy, radius) &&
+         (!in_circle(dx - 1, dy, radius) || !in_circle(dx + 1, dy, radius) ||
+          !in_circle(dx, dy - 1, radius) || !in_circle(dx, dy + 1, radius));
+}
+
+/**
+ * Draws a circle into a target and compares each pixel with the rule.
+ *
+ * @param lines Draw the edge with pxl_draw_circle_lines().
+ */
+static bool check_circle(pxl_texture* target, const circle_case* c,
+                         bool lines) {
+  static pxl_color pixels[(size_t)circle_target_size * circle_target_size];
+  pxl_begin_frame(gpu.pxl);
+  pxl_set_target(gpu.pxl, target);
+  pxl_clear(gpu.pxl, pxl_black);
+  if (c->scale != 0.0f) {
+    pxl_scale(gpu.pxl, c->scale, c->scale);
+  }
+  if (lines) {
+    pxl_draw_circle_lines(gpu.pxl, c->draw.x, c->draw.y, c->draw.radius,
+                          pxl_white);
+  } else {
+    pxl_draw_circle(gpu.pxl, c->draw.x, c->draw.y, c->draw.radius, pxl_white);
+  }
+  REQUIRE(pxl_end_frame(gpu.pxl));
+  REQUIRE(pxl_read_texture(gpu.pxl, target, pixels));
+  for (int y = 0; y < circle_target_size; ++y) {
+    for (int x = 0; x < circle_target_size; ++x) {
+      int64_t dx = (int64_t)x - c->want.x;
+      int64_t dy = (int64_t)y - c->want.y;
+      bool want  = lines ? on_circle(dx, dy, c->want.radius)
+                         : in_circle(dx, dy, c->want.radius);
+      if (!same_color(pixels[(y * circle_target_size) + x],
+                      want ? pxl_white : pxl_black, 0)) {
+        fprintf(stderr, "%s(%g, %g, %g): the pixel at (%d, %d) is wrong\n",
+                lines ? "pxl_draw_circle_lines" : "pxl_draw_circle",
+                (double)c->draw.x, (double)c->draw.y, (double)c->draw.radius, x,
+                y);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+TEST_CASE(test_circle_pixels) {
+  pxl_texture* target =
+      own_texture(pxl_create_texture(gpu.pxl, &(pxl_texture_desc){
+                                                  .width  = circle_target_size,
+                                                  .height = circle_target_size,
+                                                  .render_target = true,
+                                              }));
+  REQUIRE(target != nullptr);
+  const circle_case cases[] = {
+      // The radius rounds to whole pixels.
+      {.draw = {20, 20, 2.49f}, .want = {20, 20, 2}},
+      {.draw = {20, 20, 2.5f}, .want = {20, 20, 3}},
+      // No circle.
+      {.draw = {20, 20, -1}, .want = {0, 0, -1}},
+      {.draw = {20, 20, NAN}, .want = {0, 0, -1}},
+      // Centers outside of the target.
+      {.draw = {-5, 20, 12}, .want = {-5, 20, 12}},
+      {.draw = {70, 70, 10}, .want = {70, 70, 10}},
+      {.draw = {31, -20, 25}, .want = {31, -20, 25}},
+      {.draw = {100, 31, 10}, .want = {0, 0, -1}},
+      // The largest radius. Larger radii become this radius.
+      {.draw = {32, 16394, 16384}, .want = {32, 16394, 16384}},
+      {.draw = {-16354, 32, 16384}, .want = {-16354, 32, 16384}},
+      {.draw = {32, 16394, 100000}, .want = {32, 16394, 16384}},
+      // The transform moves the center and scales the radius.
+      {.draw = {5.3f, 7.6f, 4.3f}, .scale = 2, .want = {10, 15, 9}},
+  };
+  for (size_t i = 0; i < SDL_arraysize(cases); ++i) {
+    REQUIRE(check_circle(target, &cases[i], false));
+    REQUIRE(check_circle(target, &cases[i], true));
+  }
+  // All radii that fit, around a center pixel.
+  for (int r = 0; r < circle_target_size / 2; ++r) {
+    const circle_case c = {
+        .draw = {31.6f, 31.2f, (float)r},
+        .want = {31, 31, r},
+    };
+    REQUIRE(check_circle(target, &c, false));
+    REQUIRE(check_circle(target, &c, true));
+  }
+  return true;
+}
+
 TEST_CASE(test_triangles) {
   pxl_begin_frame(gpu.pxl);
   pxl_clear(gpu.pxl, pxl_black);
@@ -853,6 +965,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_lines);
   RUN_TEST_CASE(test_rect_lines);
   RUN_TEST_CASE(test_circles);
+  RUN_TEST_CASE(test_circle_pixels);
   RUN_TEST_CASE(test_triangles);
   RUN_TEST_CASE(test_blend);
   RUN_TEST_CASE(test_push_pop);
