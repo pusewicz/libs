@@ -509,6 +509,21 @@ TEST_CASE(test_circle_pixels) {
   return true;
 }
 
+TEST_CASE(test_circle_quad) {
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, blue);
+  pxl_set_blend(gpu.pxl, PXL_BLEND_NONE);
+  pxl_draw_circle(gpu.pxl, 7, 7, 6, red);
+  REQUIRE(finish());
+  pxl_stats stats = pxl_get_stats(gpu.pxl);
+  REQUIRE(stats.vertices == 4 && stats.indices == 6);
+  REQUIRE(same_color(pixel_at(7, 7), red, 0));
+  // The corners of the quad are outside of the circle. They keep their color.
+  REQUIRE(same_color(pixel_at(1, 1), blue, 0));
+  REQUIRE(same_color(pixel_at(13, 13), blue, 0));
+  return true;
+}
+
 TEST_CASE(test_triangles) {
   pxl_begin_frame(gpu.pxl);
   pxl_clear(gpu.pxl, pxl_black);
@@ -795,6 +810,21 @@ TEST_CASE(test_custom_shader) {
   return true;
 }
 
+TEST_CASE(test_custom_shader_shapes) {
+  pxl_shader* shader = own_shader(pxl_create_shader(gpu.pxl, &slots_frag));
+  REQUIRE(shader != nullptr);
+  const float add_nothing[4] = {};
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_set_shader(gpu.pxl, shader);
+  REQUIRE(pxl_set_uniforms(gpu.pxl, add_nothing, sizeof add_nothing));
+  pxl_draw_circle(gpu.pxl, 7, 7, 6, pxl_white);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(7, 7), pxl_white, 0));
+  REQUIRE(same_color(pixel_at(1, 1), pxl_black, 0));
+  return true;
+}
+
 /** Ends the frame into a screen texture and reads the screen. */
 static bool present(pxl_texture* screen, pxl_color* pixels) {
   SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device);
@@ -966,6 +996,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_rect_lines);
   RUN_TEST_CASE(test_circles);
   RUN_TEST_CASE(test_circle_pixels);
+  RUN_TEST_CASE(test_circle_quad);
   RUN_TEST_CASE(test_triangles);
   RUN_TEST_CASE(test_blend);
   RUN_TEST_CASE(test_push_pop);
@@ -979,6 +1010,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_draw_text);
   RUN_TEST_CASE(test_custom_font);
   RUN_TEST_CASE(test_custom_shader);
+  RUN_TEST_CASE(test_custom_shader_shapes);
   RUN_TEST_CASE(test_present);
   RUN_TEST_CASE(test_load_texture);
   RUN_TEST_CASE(test_create_errors);
