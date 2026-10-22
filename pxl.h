@@ -2794,15 +2794,29 @@ pxl_texture* pxl_load_texture(pxl_context* ctx, const char* path) {
   return texture;
 }
 
-/** Removes a texture from the draw state and the saved states. */
-static void pxl__forget_texture(pxl__state* state, const pxl_texture* texture) {
-  if (state->target == texture) {
+/** Removes a texture, shader or font from a draw state. */
+static void pxl__forget_in(pxl__state* state, const void* object) {
+  if (state->target == object) {
     state->target = nullptr;
   }
   for (size_t i = 0; i < pxl_max_textures; ++i) {
-    if (state->textures[i] == texture) {
+    if (state->textures[i] == object) {
       state->textures[i] = nullptr;
     }
+  }
+  if (state->shader == object) {
+    state->shader = nullptr;
+  }
+  if (state->font == object) {
+    state->font = nullptr;
+  }
+}
+
+/** Removes a texture, shader or font from the draw state and saved states. */
+static void pxl__forget(pxl_context* ctx, const void* object) {
+  pxl__forget_in(&ctx->state, object);
+  for (size_t i = 0; i < ctx->stack_depth; ++i) {
+    pxl__forget_in(&ctx->stack[i], object);
   }
 }
 
@@ -2812,10 +2826,7 @@ void pxl_destroy_texture(pxl_context* ctx, pxl_texture* texture) {
     return;
   }
   PXL_ASSERT(texture != ctx->canvas && texture != ctx->white);
-  pxl__forget_texture(&ctx->state, texture);
-  for (size_t i = 0; i < ctx->stack_depth; ++i) {
-    pxl__forget_texture(&ctx->stack[i], texture);
-  }
+  pxl__forget(ctx, texture);
   if (ctx->in_frame) {
     texture->next_garbage = ctx->garbage_textures;
     ctx->garbage_textures = texture;
@@ -2948,14 +2959,7 @@ void pxl_destroy_shader(pxl_context* ctx, pxl_shader* shader) {
     return;
   }
   PXL_ASSERT(shader != ctx->default_shader);
-  if (ctx->state.shader == shader) {
-    ctx->state.shader = nullptr;
-  }
-  for (size_t i = 0; i < ctx->stack_depth; ++i) {
-    if (ctx->stack[i].shader == shader) {
-      ctx->stack[i].shader = nullptr;
-    }
-  }
+  pxl__forget(ctx, shader);
   if (ctx->in_frame) {
     shader->next_garbage = ctx->garbage_shaders;
     ctx->garbage_shaders = shader;
@@ -3069,7 +3073,7 @@ static bool pxl__update_canvas(pxl_context* ctx) {
     return false;
   }
   if (ctx->canvas) {
-    pxl__forget_texture(&ctx->state, ctx->canvas);
+    pxl__forget(ctx, ctx->canvas);
     pxl__free_texture(ctx, ctx->canvas);
   }
   ctx->canvas = canvas;
@@ -4056,14 +4060,7 @@ void pxl_destroy_font(pxl_context* ctx, pxl_font* font) {
     return;
   }
   PXL_ASSERT(font != ctx->default_font);
-  if (ctx->state.font == font) {
-    ctx->state.font = nullptr;
-  }
-  for (size_t i = 0; i < ctx->stack_depth; ++i) {
-    if (ctx->stack[i].font == font) {
-      ctx->stack[i].font = nullptr;
-    }
-  }
+  pxl__forget(ctx, font);
   if (font->owns_texture) {
     pxl_destroy_texture(ctx, font->texture);
   }
