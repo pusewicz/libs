@@ -110,8 +110,6 @@ Use:
 
 Do not use:
 
-- Variable length arrays. This includes parameters such as `a[static n]`.
-  `a[static 1]` is correct.
 - `realloc(p, 0)`. It is undefined behavior in C23.
 - `<stdbit.h>`, `<threads.h>` and `memset_explicit`. Apple libc does not
   have them.
