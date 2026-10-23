@@ -574,6 +574,34 @@ TEST_CASE(test_destroy_during_frame) {
   return true;
 }
 
+TEST_CASE(test_destroy_saved_state) {
+  pxl_texture* target = own_texture(pxl_create_texture(
+      gpu.pxl,
+      &(pxl_texture_desc){.width = 4, .height = 4, .render_target = true}));
+  pxl_shader* shader  = own_shader(pxl_create_shader(gpu.pxl, &slots_frag));
+  pxl_texture* font_texture = own_texture(quad_texture(gpu.pxl));
+  pxl_font* font =
+      own_font(pxl_create_font(gpu.pxl, &(pxl_font_desc){
+                                            .texture      = font_texture,
+                                            .glyph_width  = 1,
+                                            .glyph_height = 1,
+                                        }));
+  REQUIRE(target && shader && font_texture && font);
+  pxl_begin_frame(gpu.pxl);
+  pxl_clear(gpu.pxl, pxl_black);
+  pxl_set_target(gpu.pxl, target);
+  pxl_set_shader(gpu.pxl, shader);
+  pxl_set_font(gpu.pxl, font);
+  pxl_push(gpu.pxl);
+  destroy_owned();
+  pxl_pop(gpu.pxl);
+  REQUIRE(pxl_measure_text(gpu.pxl, "Hi").x == 8.0f);
+  pxl_draw_rect(gpu.pxl, 0, 0, 1, 1, pxl_white);
+  REQUIRE(finish());
+  REQUIRE(same_color(pixel_at(0, 0), pxl_white, 0));
+  return true;
+}
+
 TEST_CASE(test_measure_text) {
   pxl_vec2 size = pxl_measure_text(gpu.pxl, "Hi");
   REQUIRE(size.x == 8.0f && size.y == 10.0f);
@@ -862,6 +890,7 @@ static TEST_SUITE(suite_gpu) {
   RUN_TEST_CASE(test_update_texture);
   RUN_TEST_CASE(test_batching);
   RUN_TEST_CASE(test_destroy_during_frame);
+  RUN_TEST_CASE(test_destroy_saved_state);
   RUN_TEST_CASE(test_measure_text);
   RUN_TEST_CASE(test_draw_text);
   RUN_TEST_CASE(test_custom_font);
