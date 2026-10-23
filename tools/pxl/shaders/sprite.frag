@@ -1,15 +1,8 @@
 #version 450
 
 // The default fragment shader. Use it as a template for custom shaders.
-//
-// v_color:   tint, straight alpha.
-// v_overlay: rgb is mixed into the result by a.
-// v_params:  x = 1 ignores the texture, y = 1 uses sharp filtering.
 
-layout(location = 0) in vec2 v_uv;
-layout(location = 1) in vec4 v_color;
-layout(location = 2) in vec4 v_overlay;
-layout(location = 3) in vec4 v_params;
+#include "pxl.glsl"
 
 layout(location = 0) out vec4 o_color;
 
@@ -31,5 +24,5 @@ void main() {
   vec4 texel = mix(texture(u_texture, uv), vec4(1.0), v_params.x);
   vec4 color = texel * vec4(v_color.rgb * v_color.a, v_color.a);
   color.rgb  = mix(color.rgb, v_overlay.rgb * color.a, v_overlay.a);
-  o_color    = color;
+  o_color    = pxl_cover(color);
 }

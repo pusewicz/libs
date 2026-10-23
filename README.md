@@ -34,7 +34,8 @@ pxl_end_frame(pxl);
 - Text with a built-in 5 x 7 font, or with your bitmap fonts.
 - Render targets, blend modes, clip areas, a transform stack, nine-slice.
 - Batching: shapes and sprites share draw calls.
-- Custom fragment shaders with uniforms and extra textures. Compile them with
+- Custom fragment shaders with uniforms and extra textures. They include
+  `tools/pxl/shaders/pxl.glsl`. Compile them with
   `tools/pxl/shaders.rb`.
 - PNG and BMP loading, and texture read-back for screenshots.
 
