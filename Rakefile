@@ -244,11 +244,17 @@ task :fuzz, [:seconds] => :fixtures do |_, args|
   seconds = args.fetch(:seconds, "60")
   output = "#{BUILD}/fuzz/fuzz_aseprite"
   corpus = "#{BUILD}/fuzz/corpus"
+  # libFuzzer writes the inputs that crash, leak, time out or use too much
+  # memory here. CI uploads them.
+  artifacts = "#{BUILD}/fuzz/artifacts"
   compile(tool("CLANG", "clang"), "tests/aseprite/fuzz.c", output,
           %w[-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all])
-  mkdir_p corpus
+  mkdir_p [corpus, artifacts]
   cp FileList["#{FIXTURES}/*.aseprite"], corpus
-  sh output, "-max_total_time=#{seconds}", "-max_len=65536", "-rss_limit_mb=2048", corpus
+  # The default timeout of one input is 20 minutes, longer than a CI job.
+  # OSS-Fuzz uses 25 seconds.
+  sh output, "-max_total_time=#{seconds}", "-max_len=65536", "-rss_limit_mb=2048", "-timeout=25",
+     "-artifact_prefix=#{artifacts}/", corpus
 end
 
 desc "Load every .ase and .aseprite file in the given directories"

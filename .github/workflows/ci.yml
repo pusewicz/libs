@@ -54,6 +54,26 @@ jobs:
             tests/pxl/test_shaders.h
             examples/pxl/example_shaders.h
 
+  # Fuzzes aseprite.h with libFuzzer for 30 seconds, so that the job takes
+  # no longer than the other jobs. If libFuzzer finds a bad input, the job
+  # fails and uploads the input.
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bin/setup
+      - id: fuzz
+        run: rake "fuzz[30]"
+      - if: failure() && steps.fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: build/fuzz/artifacts/
+
   linux:
     name: Linux (${{ matrix.cc }})
     runs-on: ubuntu-26.04

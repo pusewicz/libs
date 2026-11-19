@@ -60,7 +60,8 @@ newer, clang-format, clang-tidy, pkg-config and SDL3 yourself. Then run
 CI runs the checks on each pull request: on Linux with gcc and clang, on
 macOS with Apple clang and on Windows with MSYS2 clang. The format check
 uses clang-format 23. The Shaders job checks that the generated files are
-up to date.
+up to date. The Fuzz job runs `rake fuzz[30]` on Linux. If libFuzzer finds
+a bad input, the job fails and uploads it from `build/fuzz/artifacts/`.
 
 `rake pxl:generate` compiles the shaders of pxl.h and embeds them with its
 font. It needs glslc, spirv-cross and spirv-val. If DXC is not in PATH, it
