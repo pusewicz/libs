@@ -11,33 +11,44 @@
  *
  * Usage:
  *
- *   #define ASEPRITE_IMPLEMENTATION // In one C file only.
- *   #include "aseprite.h"
+ *   Define ASEPRITE_IMPLEMENTATION in one C file, before you include
+ *   aseprite.h:
  *
- *   aseprite_sprite sprite;
- *   aseprite_result result = aseprite_load_file("hero.aseprite", &sprite);
- *   if (result != ASEPRITE_OK) {
- *     fprintf(stderr, "%s\n", aseprite_result_string(result));
- *   }
- *   ...
- *   aseprite_free(&sprite);
+ *     #define ASEPRITE_IMPLEMENTATION
+ *     #include "aseprite.h"
  *
- * Options. Define them before you include this file:
+ *   Load a sprite, then free it:
  *
- *   ASEPRITE_MALLOC(size)  Replace malloc. Define ASEPRITE_FREE also.
- *   ASEPRITE_FREE(pointer) Replace free. Define ASEPRITE_MALLOC also.
- *   ASEPRITE_ASSERT(expr)  Replace assert.
- *   ASEPRITE_NO_STDIO      Remove aseprite_load_file. Define it for all files.
+ *     aseprite_sprite sprite;
+ *     aseprite_result result = aseprite_load_file("hero.aseprite", &sprite);
+ *     if (result != ASEPRITE_OK) {
+ *       fprintf(stderr, "%s\n", aseprite_result_string(result));
+ *     }
+ *     ...
+ *     aseprite_free(&sprite);
+ *
+ * Options:
+ *
+ *   Define them before the implementation:
+ *
+ *     ASEPRITE_MALLOC(size)   Replace malloc.
+ *     ASEPRITE_FREE(pointer)  Replace free.
+ *     ASEPRITE_ASSERT(expr)   Replace assert.
+ *     ASEPRITE_NO_STDIO       Remove aseprite_load_file.
+ *
+ *   Define all or none of ASEPRITE_MALLOC and ASEPRITE_FREE. Define
+ *   ASEPRITE_NO_STDIO in all files.
  *
  * File format:
- * https://github.com/aseprite/aseprite/blob/c9baf298a43c1e31ede7812392f80de155d5f6a2/docs/ase-file-specs.md
+ *
+ *   https://github.com/aseprite/aseprite/blob/c9baf298a43c1e31ede7812392f80de155d5f6a2/docs/ase-file-specs.md
  */
 
 #ifndef ASEPRITE_H
 #define ASEPRITE_H
 
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
-#error "aseprite.h requires C23"
+#error "aseprite.h needs C23"
 #endif
 
 #include <stddef.h>
