@@ -716,27 +716,27 @@ static bool check_inflate(const char* name) {
   uint8_t* out           = malloc(raw_size + 1);
   bool ok                = raw && compressed && out;
   if (ok) {
-    ok = aseprite_inflate(compressed, compressed_size, out, raw_size) ==
+    ok = aseprite__inflate(compressed, compressed_size, out, raw_size) ==
              ASEPRITE_OK &&
          memcmp(out, raw, raw_size) == 0;
   }
   if (ok) {
-    ok = aseprite_inflate(compressed, compressed_size, out, raw_size + 1) ==
+    ok = aseprite__inflate(compressed, compressed_size, out, raw_size + 1) ==
          ASEPRITE_ERROR_COMPRESSION;
   }
   if (ok && raw_size > 0) {
-    ok = aseprite_inflate(compressed, compressed_size, out, raw_size - 1) ==
+    ok = aseprite__inflate(compressed, compressed_size, out, raw_size - 1) ==
          ASEPRITE_ERROR_COMPRESSION;
   }
   if (ok) {
     compressed[compressed_size / 2] ^= 0x10;
-    ok = aseprite_inflate(compressed, compressed_size, out, raw_size) !=
+    ok = aseprite__inflate(compressed, compressed_size, out, raw_size) !=
          ASEPRITE_OK;
     compressed[compressed_size / 2] ^= 0x10;
   }
   size_t step = (compressed_size / 64) + 1;
   for (size_t length = 0; ok && length < compressed_size; length += step) {
-    ok = aseprite_inflate(compressed, length, out, raw_size) != ASEPRITE_OK;
+    ok = aseprite__inflate(compressed, length, out, raw_size) != ASEPRITE_OK;
   }
   if (!ok) {
     fprintf(stderr, "inflate %s failed\n", name);
@@ -765,11 +765,11 @@ TEST_CASE(test_inflate_bad_headers) {
   static const uint8_t bad_check[]      = {0x78, 0x9D, 0x03, 0x00};
   static const uint8_t dictionary[]     = {0x78, 0xBB, 0x03, 0x00};
   static const uint8_t reserved_block[] = {0x78, 0x9C, 0x07, 0x00};
-  REQUIRE(aseprite_inflate(bad_method, 4, out, 0) != ASEPRITE_OK);
-  REQUIRE(aseprite_inflate(bad_check, 4, out, 0) != ASEPRITE_OK);
-  REQUIRE(aseprite_inflate(dictionary, 4, out, 0) != ASEPRITE_OK);
-  REQUIRE(aseprite_inflate(reserved_block, 4, out, 0) != ASEPRITE_OK);
-  REQUIRE(aseprite_inflate(bad_method, 1, out, 0) != ASEPRITE_OK);
+  REQUIRE(aseprite__inflate(bad_method, 4, out, 0) != ASEPRITE_OK);
+  REQUIRE(aseprite__inflate(bad_check, 4, out, 0) != ASEPRITE_OK);
+  REQUIRE(aseprite__inflate(dictionary, 4, out, 0) != ASEPRITE_OK);
+  REQUIRE(aseprite__inflate(reserved_block, 4, out, 0) != ASEPRITE_OK);
+  REQUIRE(aseprite__inflate(bad_method, 1, out, 0) != ASEPRITE_OK);
   return true;
 }
 

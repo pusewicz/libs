@@ -79,6 +79,8 @@ Use the STB pattern:
 - Stop the build with `#error` if `__STDC_VERSION__` is less than `202311L`.
 - Prefix all public identifiers with `<name>_`. Prefix all macros with
   `<NAME>_`.
+- Prefix all internal identifiers with `<name>__`. Prefix internal macros and
+  enum constants with `<NAME>__`, but not the guards.
 - Make all internal functions and data `static`.
 - Write a short Doxygen comment for each public declaration. Give the
   purpose, the parameters, the return value and who owns the memory.
