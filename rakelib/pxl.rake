@@ -81,3 +81,28 @@ namespace :pxl do
   desc "Generate all parts of pxl.h and the shaders of its tests and examples"
   task generate: %i[shaders font custom_shaders]
 end
+
+require_relative "../playground/pxl/build"
+
+%w[emcc node].each { |tool| BANNER_ROWS[tool] = -> { describe(tool) } }
+
+desc "Build the pxl playground into build/playground/site (needs Emscripten and Node.js)"
+task "pxl:playground" do
+  PxlPlayground.build
+end
+
+namespace :pxl do
+  namespace :playground do
+    desc "Serve the pxl playground on http://localhost:8000/pxl/ (PORT changes the port)"
+    task :serve do
+      abort "Run rake pxl:playground first" unless File.exist?("#{PxlPlayground::OUTPUT}/index.html")
+      sh "node", "#{PxlPlayground::SOURCE}/serve.mjs", PxlPlayground::SITE, ENV.fetch("PORT", "8000")
+    end
+
+    desc "Test the pxl playground and its GPU layer in headless Chromium"
+    task test: "pxl:playground" do
+      PxlPlayground.build_tests
+      sh "node", "#{PxlPlayground::SOURCE}/test.mjs", PxlPlayground::WORK
+    end
+  end
+end

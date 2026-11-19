@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pxl playground</title>
+    <meta
+      name="description"
+      content="Write a pixel-art game in C with pxl.h. The browser compiles it as you type and runs it next to the code."
+    />
+    <link rel="stylesheet" href="playground.css" />
+  </head>
+  <body data-state="loading">
+    <header class="bar">
+      <h1 class="title">pxl <span>playground</span></h1>
+      <label class="field">
+        <span class="visually-hidden">Example</span>
+        <select id="example" title="Load an example">
+          <option value="hello">hello.c</option>
+          <option value="demo">demo.c</option>
+          <option value="shader">shader.c</option>
+        </select>
+      </label>
+      <button id="run" type="button" title="Compile and restart (Ctrl+Enter)">
+        Run
+      </button>
+      <label class="toggle" title="Compile when the code changes">
+        <input id="auto" type="checkbox" checked />
+        <span>Auto</span>
+      </label>
+      <p id="status" class="status" role="status" aria-live="polite">
+        Loading the compiler…
+      </p>
+      <a class="link" href="https://github.com/pusewicz/libs">GitHub</a>
+    </header>
+    <main class="panes">
+      <section id="editor" class="editor" aria-label="Code"></section>
+      <div
+        id="splitter"
+        class="splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the panes"
+        tabindex="0"
+      ></div>
+      <section class="side">
+        <div id="preview" class="preview" aria-label="Preview">
+          <p class="placeholder">The program runs here.</p>
+        </div>
+        <section class="console" aria-label="Output">
+          <header class="console-bar">
+            <span>Output</span>
+            <button id="clear" type="button" class="small">Clear</button>
+          </header>
+          <pre id="output" class="output"></pre>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="playground.js"></script>
+  </body>
+</html>

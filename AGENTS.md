@@ -22,6 +22,8 @@ development. Each library is one header file.
   library.
 - `rakelib/<name>.rake` - the Rake tasks of the library. Rake loads them
   automatically.
+- `playground/<name>/` - the web playground of the library. GitHub Pages
+  hosts it (`.github/workflows/pages.yml`).
 - `third_party/` - code from other projects, for tests and examples only.
 - `compile_flags.txt` - the compiler flags.
 - `build/` - the build output. Do not commit it.
@@ -42,6 +44,9 @@ first when a build fails. A library adds rows with `BANNER_ROWS`.
 - `rake sweep[DIRS]` - load all `.ase` and `.aseprite` files in DIRS. Use
   `:` between directories. Do not give it `build/`: some test files there
   are not valid on purpose.
+- `rake pxl:playground` - build the pxl playground. It needs Emscripten and
+  Node.js. `rake pxl:playground:test` tests it in headless Chromium. Run it
+  when you change `pxl.h`, `examples/pxl/` or `playground/pxl/`.
 
 ## Build
 

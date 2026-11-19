@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>pxl browser test</title>
+  </head>
+  <body>
+    <!-- The GPU layer draws into this canvas. -->
+    <canvas id="canvas" width="16" height="16"></canvas>
+    <script type="module">
+      // Runs a test program of pxl: test.html?program=test_pxl. The result
+      // goes to the console and to window.exitStatus.
+      const program = new URLSearchParams(location.search).get("program");
+      try {
+        if (!/^\w+$/.test(program ?? "")) {
+          throw new Error("Give the program: test.html?program=NAME");
+        }
+        const { default: create } = await import(`./${program}.mjs`);
+        await create({
+          canvas: document.getElementById("canvas"),
+          preRun: [(module) => (module.ENV.PXL_TEST_REQUIRE_GPU = "1")],
+          print: (text) => console.log(text),
+          printErr: (text) => console.error(text),
+          onExit: (status) => (window.exitStatus = status),
+        });
+      } catch (error) {
+        console.error(String(error?.stack ?? error));
+        window.exitStatus ??= -1;
+      }
+    </script>
+  </body>
+</html>

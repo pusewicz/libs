@@ -23,7 +23,8 @@ require "shellwords"
 BUILD = "build"
 FIXTURES = "#{BUILD}/fixtures/aseprite"
 SANITIZE = %w[-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all].freeze
-SOURCES = FileList["*.h", "tests/**/*.{c,h}", "examples/**/*.{c,h}"]
+SOURCES = FileList["*.h", "tests/**/*.{c,h}", "examples/**/*.{c,h}", "playground/**/*.{c,h}"]
+          .exclude("**/node_modules/**")
 TIDY_SOURCES = FileList["tests/**/*.c", "examples/**/*.c"]
 LLVM = "/opt/homebrew/opt/llvm/bin"
 EXE = RbConfig::CONFIG["EXEEXT"]

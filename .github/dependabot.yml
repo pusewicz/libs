@@ -1,7 +1,12 @@
-# Keeps the pinned versions of the GitHub Actions current.
+# Keeps the pinned versions of the GitHub Actions and of the npm packages of
+# the pxl playground current.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /playground/pxl
     schedule:
       interval: monthly
