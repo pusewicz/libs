@@ -69,8 +69,8 @@ first when a build fails. A library adds rows with `BANNER_ROWS`.
 
 Use the STB pattern:
 
-1. A banner comment: name, purpose, version, `SPDX-License-Identifier: Zlib`
-   and short usage.
+1. A banner comment: `<name>.h - <verb> ...`, `Version: x.y.z`, the Zlib SPDX
+   line, the copyright line, a description, `Usage:`, notes, `Options:`, links.
 2. The public API inside the include guard `<NAME>_H`.
 3. The implementation inside `#ifdef <NAME>_IMPLEMENTATION`. The user defines
    this macro in one translation unit only. Guard the implementation, so that

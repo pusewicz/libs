@@ -1,7 +1,9 @@
 /*
- * pxl.h - a 2D renderer for pixel-art games, on top of SDL3 GPU.
- * Version 0.1.0
+ * pxl.h - draw 2D pixel-art games with SDL3 GPU.
+ *
+ * Version: 0.1.0
  * SPDX-License-Identifier: Zlib
+ * Copyright (c) 2026 Piotr Usewicz
  *
  * pxl draws sprites, shapes and text into a small canvas, then scales the
  * canvas to the window without blur. It batches draws into few GPU calls
@@ -39,18 +41,26 @@
  *   - Use a context and its resources from one thread.
  *   - Link with SDL3, and with libm on Linux.
  *
- * Custom shaders: write a GLSL fragment shader like
- * tools/pxl/shaders/sprite.frag, then make a C header with
+ * Custom shaders:
+ *
+ *   Write a GLSL fragment shader like tools/pxl/shaders/sprite.frag, then
+ *   make a C header with:
  *
  *     ruby tools/pxl/shaders.rb -o my_shaders.h my_shader.frag
  *
- * The header has a pxl_shader_desc for each shader. See pxl_create_shader().
+ *   The header has a pxl_shader_desc for each shader. See
+ *   pxl_create_shader().
  *
- * Options. Define them before the implementation:
+ * Options:
  *
- *   PXL_MALLOC, PXL_REALLOC, PXL_FREE  Replace SDL_malloc, SDL_realloc and
- *                                      SDL_free. Define all three or none.
- *   PXL_ASSERT                         Replaces SDL_assert.
+ *   Define them before the implementation:
+ *
+ *     PXL_MALLOC(size)            Replace SDL_malloc.
+ *     PXL_REALLOC(pointer, size)  Replace SDL_realloc.
+ *     PXL_FREE(pointer)           Replace SDL_free.
+ *     PXL_ASSERT(condition)       Replace SDL_assert.
+ *
+ *   Define all or none of PXL_MALLOC, PXL_REALLOC and PXL_FREE.
  */
 
 #ifndef PXL_H
