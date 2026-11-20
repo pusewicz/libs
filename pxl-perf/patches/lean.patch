@@ -1,0 +1,42 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -3406,10 +3406,39 @@
+  * @param texture The texture, or nullptr for plain color. Plain color can
+  *                use any texture, so it keeps the batch of the last draw.
+  */
++/** Checks if a command draws with the current state and a texture. */
++static bool pxl__matches_state(const pxl_context* ctx, const pxl__command* c,
++                               const pxl_shader* shader,
++                               const pxl_texture* texture) {
++  const pxl__state* s = &ctx->state;
++  if (c->kind != PXL__COMMAND_DRAW || c->target != pxl__target(ctx) ||
++      c->shader != shader || c->blend != s->blend ||
++      c->clipped != s->clipped || c->uniform_offset != s->uniform_offset ||
++      c->uniform_size != s->uniform_size ||
++      (s->clipped && !SDL_RectsEqual(&c->clip, &s->clip))) {
++    return false;
++  }
++  for (size_t i = 1; i < shader->num_textures; ++i) {
++    SDL_GPUTextureSamplerBinding b =
++        pxl__binding(ctx, s->textures[i] ? s->textures[i] : ctx->white);
++    if (c->bindings[i].texture != b.texture ||
++        c->bindings[i].sampler != b.sampler) {
++      return false;
++    }
++  }
++  return !texture || (c->bindings[0].texture == texture->handle &&
++                      c->bindings[0].sampler == pxl__sampler(ctx, texture));
++}
++
+ static pxl__command* pxl__draw_command(pxl_context* ctx,
+                                        const pxl_texture* texture) {
+   const pxl__state* s = &ctx->state;
+   pxl_shader* shader  = s->shader ? s->shader : ctx->default_shader;
++  pxl__command* prev =
++      ctx->command_count ? &ctx->commands[ctx->command_count - 1] : nullptr;
++  if (prev && pxl__matches_state(ctx, prev, shader, texture)) {
++    return prev;
++  }
+   pxl__command next   = {
+       .kind           = PXL__COMMAND_DRAW,
+       .target         = pxl__target(ctx),

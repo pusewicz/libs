@@ -1,0 +1,57 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -3946,20 +3946,41 @@
+   if (!pxl__circle_in_target(ctx, x, y, radius, &c)) {
+     return;
+   }
+-  // A pixel is on the edge if one of its four neighbors is outside.
+-  for (int dy = c.first_row; dy <= c.last_row; ++dy) {
+-    int half  = pxl__circle_span(c.radius, dy);
+-    int above = pxl__circle_span(c.radius, dy - 1);
+-    int below = pxl__circle_span(c.radius, dy + 1);
+-    int inner = (above < below ? above : below) + 1;
+-    inner     = inner < half ? inner : half;
+-    if (inner <= 0) {
+-      pxl__fill(ctx, c.x - half, c.y + dy, (2 * half) + 1, 1, color);
+-    } else {
+-      int width = half - inner + 1;
+-      pxl__fill(ctx, c.x - half, c.y + dy, width, 1, color);
+-      pxl__fill(ctx, c.x + inner, c.y + dy, width, 1, color);
++  // A pixel is on the edge if one of its four neighbors is outside. Rows
++  // with the same edge become one quad, or two.
++  int above     = pxl__circle_span(c.radius, c.first_row - 1);
++  int half      = pxl__circle_span(c.radius, c.first_row);
++  int run_top   = c.first_row;
++  int run_half  = 0;
++  int run_inner = 0;
++  for (int dy = c.first_row; dy <= c.last_row + 1; ++dy) {
++    int below = 0;
++    int inner = 0;
++    if (dy <= c.last_row) {
++      below = pxl__circle_span(c.radius, dy + 1);
++      inner = (above < below ? above : below) + 1;
++      inner = inner < half ? inner : half;
++      inner = inner > 0 ? inner : 0;
+     }
++    bool end = dy > c.last_row || half != run_half || inner != run_inner;
++    if (end && dy > run_top) {
++      int rows = dy - run_top;
++      if (run_inner <= 0) {
++        pxl__fill(ctx, c.x - run_half, c.y + run_top, (2 * run_half) + 1, rows,
++                  color);
++      } else {
++        int width = run_half - run_inner + 1;
++        pxl__fill(ctx, c.x - run_half, c.y + run_top, width, rows, color);
++        pxl__fill(ctx, c.x + run_inner, c.y + run_top, width, rows, color);
++      }
++    }
++    if (end) {
++      run_top   = dy;
++      run_half  = half;
++      run_inner = inner;
++    }
++    above = half;
++    half  = below;
+   }
+ }
+ 

@@ -1,0 +1,499 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -2054,6 +2054,8 @@
+ constexpr size_t pxl__stack_capacity = 32;
+ constexpr size_t pxl__min_capacity   = 256;
+ constexpr size_t pxl__uniform_align  = 16;
++/** The quads of one draw call: 16-bit indices reach 65536 vertices. */
++constexpr uint32_t pxl__quads_per_draw = 16384;
+ constexpr int pxl__max_radius        = 1 << 14;
+ /** Floats hold all whole numbers up to this. */
+ constexpr float pxl__coordinate_limit = 16777216.0f;
+@@ -2144,7 +2146,7 @@
+   SDL_Rect clip;
+   bool clipped;
+   size_t uniform_offset, uniform_size;
+-  uint32_t first_index, index_count;
++  uint32_t first_quad, quad_count;
+ } pxl__command;
+ 
+ struct pxl_context {
+@@ -2167,10 +2169,9 @@
+ 
+   pxl__pipeline* pipelines;
+   size_t pipeline_count, pipeline_capacity;
++  /** The geometry of the frame: 4 vertices for each quad or triangle. */
+   pxl__vertex* vertices;
+   size_t vertex_count, vertex_capacity;
+-  uint32_t* indices;
+-  size_t index_count, index_capacity;
+   pxl__command* commands;
+   size_t command_count, command_capacity;
+   uint8_t* uniforms;
+@@ -2178,8 +2179,8 @@
+ 
+   SDL_GPUBuffer* vertex_buffer;
+   size_t vertex_buffer_size;
++  /** The indices of pxl__quads_per_draw quads. They do not change. */
+   SDL_GPUBuffer* index_buffer;
+-  size_t index_buffer_size;
+   SDL_GPUTransferBuffer* transfer_buffer;
+   size_t transfer_buffer_size;
+ 
+@@ -3010,6 +3011,45 @@
+   return true;
+ }
+ 
++/** Creates the index buffer: quad q is the triangles 012 and 023 of 4 q. */
++static bool pxl__create_quad_indices(pxl_context* ctx) {
++  constexpr Uint32 size = sizeof(uint16_t) * 6 * pxl__quads_per_draw;
++  ctx->index_buffer     = SDL_CreateGPUBuffer(
++      ctx->device, &(SDL_GPUBufferCreateInfo){
++                           .usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = size});
++  SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(
++      ctx->device, &(SDL_GPUTransferBufferCreateInfo){
++                       .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++                       .size  = size,
++                   });
++  uint16_t* indices =
++      transfer ? SDL_MapGPUTransferBuffer(ctx->device, transfer, false)
++               : nullptr;
++  if (!ctx->index_buffer || !indices) {
++    SDL_ReleaseGPUTransferBuffer(ctx->device, transfer);
++    return false;
++  }
++  const uint16_t order[] = {0, 1, 2, 0, 2, 3};
++  for (size_t i = 0; i < 6 * (size_t)pxl__quads_per_draw; ++i) {
++    indices[i] = (uint16_t)(((i / 6) * 4) + order[i % 6]);
++  }
++  SDL_UnmapGPUTransferBuffer(ctx->device, transfer);
++  SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
++  if (!cmd) {
++    SDL_ReleaseGPUTransferBuffer(ctx->device, transfer);
++    return false;
++  }
++  SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
++  SDL_UploadToGPUBuffer(
++      copy, &(SDL_GPUTransferBufferLocation){.transfer_buffer = transfer},
++      &(SDL_GPUBufferRegion){.buffer = ctx->index_buffer, .size = size},
++      false);
++  SDL_EndGPUCopyPass(copy);
++  bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
++  SDL_ReleaseGPUTransferBuffer(ctx->device, transfer);
++  return submitted;
++}
++
+ static bool pxl__create_shaders(pxl_context* ctx) {
+   const pxl_shader_code vertex[] = {
+       {.code = pxl__sprite_vert_spirv, .size = sizeof pxl__sprite_vert_spirv},
+@@ -3149,7 +3189,7 @@
+                                            .pixels = &pxl_white,
+                                        });
+   if (!ctx->white || !pxl__create_samplers(ctx) || !pxl__create_shaders(ctx) ||
+-      !pxl__update_canvas(ctx)) {
++      !pxl__create_quad_indices(ctx) || !pxl__update_canvas(ctx)) {
+     pxl_destroy(ctx);
+     return nullptr;
+   }
+@@ -3199,7 +3239,6 @@
+   }
+   PXL_FREE(ctx->pipelines);
+   PXL_FREE(ctx->vertices);
+-  PXL_FREE(ctx->indices);
+   PXL_FREE(ctx->commands);
+   PXL_FREE(ctx->uniforms);
+   PXL_FREE(ctx);
+@@ -3420,7 +3459,7 @@
+       .clipped        = s->clipped,
+       .uniform_offset = s->uniform_offset,
+       .uniform_size   = s->uniform_size,
+-      .first_index    = (uint32_t)ctx->index_count,
++      .first_quad     = (uint32_t)(ctx->vertex_count / 4),
+   };
+   for (size_t i = 1; i < shader->num_textures; ++i) {
+     next.bindings[i] =
+@@ -3448,74 +3487,58 @@
+   return &ctx->commands[ctx->command_count - 1];
+ }
+ 
+-typedef struct pxl__geometry {
+-  pxl__vertex* vertices;
+-  uint32_t* indices;
+-  uint32_t base;
+-} pxl__geometry;
+-
+-/** Reserves vertices and indices at the end of the geometry of the frame. */
+-static bool pxl__reserve(pxl_context* ctx, size_t vertex_count,
+-                         size_t index_count, pxl__geometry out[static 1]) {
++/** Reserves quads at the end of the geometry of the frame. */
++static pxl__vertex* pxl__reserve(pxl_context* ctx, size_t quad_count) {
+   size_t vertices = 0;
+-  size_t indices  = 0;
+-  if (ckd_add(&vertices, ctx->vertex_count, vertex_count) ||
+-      ckd_add(&indices, ctx->index_count, index_count) ||
+-      vertices > UINT32_MAX || indices > UINT32_MAX) {
+-    return pxl__fail(ctx, "too many vertices");
+-  }
+-  pxl__vertex* grown_vertices = pxl__grow(ctx->vertices, sizeof *ctx->vertices,
+-                                          vertices, &ctx->vertex_capacity);
+-  if (!grown_vertices) {
+-    return pxl__fail(ctx, "out of memory");
++  if (ckd_mul(&vertices, quad_count, 4u) ||
++      ckd_add(&vertices, ctx->vertex_count, vertices) || vertices > INT32_MAX) {
++    pxl__fail(ctx, "too many vertices");
++    return nullptr;
+   }
+-  ctx->vertices           = grown_vertices;
+-  uint32_t* grown_indices = pxl__grow(ctx->indices, sizeof *ctx->indices,
+-                                      indices, &ctx->index_capacity);
+-  if (!grown_indices) {
+-    return pxl__fail(ctx, "out of memory");
++  pxl__vertex* grown = pxl__grow(ctx->vertices, sizeof *ctx->vertices,
++                                 vertices, &ctx->vertex_capacity);
++  if (!grown) {
++    pxl__fail(ctx, "out of memory");
++    return nullptr;
+   }
+-  ctx->indices = grown_indices;
+-  *out         = (pxl__geometry){
+-      .vertices = ctx->vertices + ctx->vertex_count,
+-      .indices  = ctx->indices + ctx->index_count,
+-      .base     = (uint32_t)ctx->vertex_count,
+-  };
+-  ctx->vertex_count = vertices;
+-  ctx->index_count  = indices;
+-  return true;
++  ctx->vertices      = grown;
++  pxl__vertex* quads = ctx->vertices + ctx->vertex_count;
++  ctx->vertex_count  = vertices;
++  return quads;
+ }
+ 
+ /**
+- * Reserves vertices and indices in the batch of a texture.
++ * Reserves quads in the batch of a texture.
+  *
+  * @param texture The texture, or nullptr for plain color.
+- * @return false if the draw cannot happen.
++ * @return The 4 vertices of each quad, or nullptr if the draw cannot happen.
+  */
+-static bool pxl__append(pxl_context* ctx, const pxl_texture* texture,
+-                        size_t vertex_count, size_t index_count,
+-                        pxl__geometry out[static 1]) {
++static pxl__vertex* pxl__append(pxl_context* ctx, const pxl_texture* texture,
++                                size_t quad_count) {
+   PXL_ASSERT(ctx->in_frame);
+   PXL_ASSERT(!texture || texture != pxl__target(ctx));
+   if (!ctx->in_frame) {
+-    return pxl__fail(ctx, "draw outside of a frame");
++    pxl__fail(ctx, "draw outside of a frame");
++    return nullptr;
+   }
+   if (texture && texture == pxl__target(ctx)) {
+-    return pxl__fail(ctx, "a texture cannot be drawn into itself");
++    pxl__fail(ctx, "a texture cannot be drawn into itself");
++    return nullptr;
+   }
+   if (ctx->state.clipped &&
+       (ctx->state.clip.w <= 0 || ctx->state.clip.h <= 0)) {
+-    return false;
++    return nullptr;
+   }
+   pxl__command* command = pxl__draw_command(ctx, texture);
+   if (!command) {
+-    return pxl__fail(ctx, "out of memory");
++    pxl__fail(ctx, "out of memory");
++    return nullptr;
+   }
+-  if (!pxl__reserve(ctx, vertex_count, index_count, out)) {
+-    return false;
++  pxl__vertex* quads = pxl__reserve(ctx, quad_count);
++  if (quads) {
++    command->quad_count += (uint32_t)quad_count;
+   }
+-  command->index_count += (uint32_t)index_count;
+-  return true;
++  return quads;
+ }
+ 
+ /** The params of the vertices of a texture, or of plain color. */
+@@ -3536,14 +3559,14 @@
+ static void pxl__quad(pxl_context* ctx, const pxl_texture* texture,
+                       const pxl_vec2 p[static 4], const float uv[static 4],
+                       pxl_color color, pxl_color overlay) {
+-  pxl__geometry g = {};
+-  if (!pxl__append(ctx, texture, 4, 6, &g)) {
++  pxl__vertex* vertices = pxl__append(ctx, texture, 1);
++  if (!vertices) {
+     return;
+   }
+   const float u[] = {uv[0], uv[2], uv[2], uv[0]};
+   const float v[] = {uv[1], uv[1], uv[3], uv[3]};
+   for (size_t i = 0; i < 4; ++i) {
+-    g.vertices[i] = (pxl__vertex){
++    vertices[i] = (pxl__vertex){
+         .x       = p[i].x,
+         .y       = p[i].y,
+         .u       = u[i],
+@@ -3551,11 +3574,7 @@
+         .color   = color,
+         .overlay = overlay,
+     };
+-    pxl__params(texture, g.vertices[i].params);
+-  }
+-  const uint32_t order[] = {0, 1, 2, 0, 2, 3};
+-  for (size_t i = 0; i < 6; ++i) {
+-    g.indices[i] = g.base + order[i];
++    pxl__params(texture, vertices[i].params);
+   }
+ }
+ 
+@@ -3966,42 +3985,47 @@
+ void pxl_draw_triangle(pxl_context* ctx, float x0, float y0, float x1, float y1,
+                        float x2, float y2, pxl_color color) {
+   PXL_ASSERT(ctx);
+-  pxl__geometry g = {};
+-  if (!pxl__append(ctx, nullptr, 3, 3, &g)) {
++  pxl__vertex* vertices = pxl__append(ctx, nullptr, 1);
++  if (!vertices) {
+     return;
+   }
++  // The fourth corner repeats the third: the second triangle has no area.
+   const pxl_vec2 p[] = {
+       pxl__vertex_position(ctx, x0, y0),
+       pxl__vertex_position(ctx, x1, y1),
+       pxl__vertex_position(ctx, x2, y2),
+   };
+-  for (size_t i = 0; i < 3; ++i) {
+-    g.vertices[i] = (pxl__vertex){.x = p[i].x, .y = p[i].y, .color = color};
+-    pxl__params(nullptr, g.vertices[i].params);
+-    g.indices[i] = g.base + (uint32_t)i;
++  for (size_t i = 0; i < 4; ++i) {
++    const pxl_vec2* corner = &p[i < 3 ? i : 2];
++    vertices[i] = (pxl__vertex){.x = corner->x, .y = corner->y, .color = color};
++    pxl__params(nullptr, vertices[i].params);
+   }
+ }
+ 
+ void pxl_draw_triangles(pxl_context* ctx, pxl_texture* texture,
+                         const pxl_vertex* vertices, size_t count) {
+   PXL_ASSERT(ctx && (vertices || count == 0) && count % 3 == 0);
+-  count -= count % 3;
+-  pxl__geometry g = {};
+-  if (count == 0 || !pxl__append(ctx, texture, count, count, &g)) {
++  size_t triangles = count / 3;
++  pxl__vertex* out = triangles ? pxl__append(ctx, texture, triangles) : nullptr;
++  if (!out) {
+     return;
+   }
+-  for (size_t i = 0; i < count; ++i) {
+-    const pxl_vertex* v = &vertices[i];
+-    pxl_vec2 p          = pxl__vertex_position(ctx, v->x, v->y);
+-    g.vertices[i]       = (pxl__vertex){
+-        .x     = p.x,
+-        .y     = p.y,
+-        .u     = v->u,
+-        .v     = v->v,
+-        .color = v->color,
+-    };
+-    pxl__params(texture, g.vertices[i].params);
+-    g.indices[i] = g.base + (uint32_t)i;
++  // Each triangle is a quad whose fourth corner repeats the third.
++  for (size_t t = 0; t < triangles; ++t) {
++    const pxl_vertex* in = &vertices[t * 3];
++    pxl__vertex* quad    = &out[t * 4];
++    for (size_t i = 0; i < 3; ++i) {
++      pxl_vec2 p = pxl__vertex_position(ctx, in[i].x, in[i].y);
++      quad[i]    = (pxl__vertex){
++          .x     = p.x,
++          .y     = p.y,
++          .u     = in[i].u,
++          .v     = in[i].v,
++          .color = in[i].color,
++      };
++      pxl__params(texture, quad[i].params);
++    }
++    quad[3] = quad[2];
+   }
+ }
+ 
+@@ -4362,7 +4386,7 @@
+         pass, 0, &(SDL_GPUBufferBinding){.buffer = ctx->vertex_buffer}, 1);
+     SDL_BindGPUIndexBuffer(pass,
+                            &(SDL_GPUBufferBinding){.buffer = ctx->index_buffer},
+-                           SDL_GPU_INDEXELEMENTSIZE_32BIT);
++                           SDL_GPU_INDEXELEMENTSIZE_16BIT);
+   }
+   SDL_SetGPUViewport(pass, &(SDL_GPUViewport){
+                                .w         = (float)w,
+@@ -4405,6 +4429,18 @@
+   return true;
+ }
+ 
++/** Draws quads. Splits them into draw calls that 16-bit indices reach. */
++static void pxl__draw_quads(pxl_context* ctx, SDL_GPURenderPass* pass,
++                            uint32_t first, uint32_t count) {
++  while (count > 0) {
++    uint32_t quads = count < pxl__quads_per_draw ? count : pxl__quads_per_draw;
++    SDL_DrawGPUIndexedPrimitives(pass, quads * 6, 1, 0, (Sint32)(first * 4), 0);
++    ctx->stats.draw_calls++;
++    first += quads;
++    count -= quads;
++  }
++}
++
+ /** Records one draw command into the current render pass. */
+ static void pxl__render_draw(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
+                              pxl__pass pass[static 1], const pxl__command* c) {
+@@ -4441,9 +4477,7 @@
+     SDL_PushGPUFragmentUniformData(cmd, 0, ctx->uniforms + c->uniform_offset,
+                                    (Uint32)c->uniform_size);
+   }
+-  SDL_DrawGPUIndexedPrimitives(pass->handle, c->index_count, 1, c->first_index,
+-                               0, 0);
+-  ctx->stats.draw_calls++;
++  pxl__draw_quads(ctx, pass->handle, c->first_quad, c->quad_count);
+   pass->last = c;
+ }
+ 
+@@ -4466,7 +4500,7 @@
+         continue;
+       }
+     }
+-    if (!clear && c->index_count > 0) {
++    if (!clear && c->quad_count > 0) {
+       pxl__render_draw(ctx, cmd, &pass, c);
+     }
+   }
+@@ -4481,18 +4515,13 @@
+     return true;
+   }
+   size_t vertex_bytes = 0;
+-  size_t index_bytes  = 0;
+-  size_t total        = 0;
+   if (ckd_mul(&vertex_bytes, ctx->vertex_count, sizeof *ctx->vertices) ||
+-      ckd_mul(&index_bytes, ctx->index_count, sizeof *ctx->indices) ||
+-      ckd_add(&total, vertex_bytes, index_bytes) || total > UINT32_MAX) {
++      vertex_bytes > UINT32_MAX) {
+     return pxl__fail(ctx, "too many vertices");
+   }
+   if (!pxl__reserve_buffer(ctx, &ctx->vertex_buffer, &ctx->vertex_buffer_size,
+                            vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX) ||
+-      !pxl__reserve_buffer(ctx, &ctx->index_buffer, &ctx->index_buffer_size,
+-                           index_bytes, SDL_GPU_BUFFERUSAGE_INDEX) ||
+-      !pxl__reserve_transfer(ctx, total)) {
++      !pxl__reserve_transfer(ctx, vertex_bytes)) {
+     return pxl__fail(ctx, SDL_GetError());
+   }
+   uint8_t* mapped =
+@@ -4501,7 +4530,6 @@
+     return pxl__fail(ctx, SDL_GetError());
+   }
+   memcpy(mapped, ctx->vertices, vertex_bytes);
+-  memcpy(mapped + vertex_bytes, ctx->indices, index_bytes);
+   SDL_UnmapGPUTransferBuffer(ctx->device, ctx->transfer_buffer);
+ 
+   SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+@@ -4514,16 +4542,6 @@
+                             .size   = (Uint32)vertex_bytes,
+                         },
+                         true);
+-  SDL_UploadToGPUBuffer(copy,
+-                        &(SDL_GPUTransferBufferLocation){
+-                            .transfer_buffer = ctx->transfer_buffer,
+-                            .offset          = (Uint32)vertex_bytes,
+-                        },
+-                        &(SDL_GPUBufferRegion){
+-                            .buffer = ctx->index_buffer,
+-                            .size   = (Uint32)index_bytes,
+-                        },
+-                        true);
+   SDL_EndGPUCopyPass(copy);
+   return true;
+ }
+@@ -4532,11 +4550,11 @@
+  * Appends the quad that shows the canvas in the window. It is not part of a
+  * batch.
+  *
+- * @return The first index of the quad, or -1.
++ * @return The index of the quad, or -1.
+  */
+ static int64_t pxl__append_canvas_quad(pxl_context* ctx, bool sharp) {
+-  pxl__geometry g = {};
+-  if (!pxl__reserve(ctx, 4, 6, &g)) {
++  pxl__vertex* vertices = pxl__reserve(ctx, 1);
++  if (!vertices) {
+     return -1;
+   }
+   const pxl_rect* r = &ctx->viewport;
+@@ -4545,7 +4563,7 @@
+   const float u[]   = {0.0f, 1.0f, 1.0f, 0.0f};
+   const float v[]   = {0.0f, 0.0f, 1.0f, 1.0f};
+   for (size_t i = 0; i < 4; ++i) {
+-    g.vertices[i] = (pxl__vertex){
++    vertices[i] = (pxl__vertex){
+         .x      = x[i],
+         .y      = y[i],
+         .u      = u[i],
+@@ -4554,22 +4572,18 @@
+         .params = {0, (uint8_t)(sharp ? 255 : 0)},
+     };
+   }
+-  const uint32_t order[] = {0, 1, 2, 0, 2, 3};
+-  for (size_t i = 0; i < 6; ++i) {
+-    g.indices[i] = g.base + order[i];
+-  }
+-  return (int64_t)ctx->index_count - 6;
++  return (int64_t)(ctx->vertex_count / 4) - 1;
+ }
+ 
+ /**
+  * Shows the canvas in a target.
+  *
+- * @param first_index The first index of the canvas quad, or -1 to only clear.
++ * @param canvas_quad The index of the canvas quad, or -1 to only clear.
+  */
+ static void pxl__render_canvas(pxl_context* ctx, SDL_GPUCommandBuffer* cmd,
+                                SDL_GPUTexture* target,
+                                SDL_GPUTextureFormat format, int w, int h,
+-                               int64_t first_index, bool sharp) {
++                               int64_t canvas_quad, bool sharp) {
+   SDL_GPURenderPass* pass =
+       pxl__begin_pass(ctx, cmd, target, w, h, &ctx->letterbox, false);
+   if (!pass) {
+@@ -4579,7 +4593,7 @@
+       ctx, ctx->default_shader->handle, PXL_BLEND_ALPHA, format);
+   if (!pipeline) {
+     pxl__fail(ctx, SDL_GetError());
+-  } else if (first_index >= 0) {
++  } else if (canvas_quad >= 0) {
+     pxl__bind_pipeline(cmd, pass, pipeline, w, h);
+     SDL_SetGPUScissor(pass, &(SDL_Rect){.w = w, .h = h});
+     SDL_BindGPUFragmentSamplers(
+@@ -4589,8 +4603,7 @@
+             .sampler = ctx->samplers[sharp ? 1 : 0][PXL_WRAP_CLAMP],
+         },
+         1);
+-    SDL_DrawGPUIndexedPrimitives(pass, 6, 1, (Uint32)first_index, 0, 0);
+-    ctx->stats.draw_calls++;
++    pxl__draw_quads(ctx, pass, (uint32_t)canvas_quad, 1);
+   }
+   SDL_EndGPURenderPass(pass);
+ }
+@@ -4606,7 +4619,7 @@
+     canvas_quad = pxl__append_canvas_quad(ctx, sharp);
+   }
+   ctx->stats.vertices = ctx->vertex_count;
+-  ctx->stats.indices  = ctx->index_count;
++  ctx->stats.indices  = ctx->vertex_count / 4 * 6;
+   bool uploaded       = pxl__upload_geometry(ctx, cmd);
+   if (uploaded) {
+     pxl__render_commands(ctx, cmd);
+@@ -4621,7 +4634,6 @@
+ static void pxl__reset_frame(pxl_context* ctx) {
+   ctx->in_frame      = false;
+   ctx->vertex_count  = 0;
+-  ctx->index_count   = 0;
+   ctx->command_count = 0;
+   ctx->uniform_size  = 0;
+   pxl__collect_garbage(ctx);

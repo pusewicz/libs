@@ -1,0 +1,33 @@
+--- a/pxl.h
++++ b/pxl.h
+@@ -2235,8 +2235,20 @@
+ // ---------------------------------------------------------------------------
+ // Math
+ 
++/**
++ * Rounds down. floorf() is a library call on x86-64 without SSE4.1; this is
++ * not. Floats from 2^23 up are whole numbers already.
++ */
++static float pxl__floor(float value) {
++  if (!(fabsf(value) < 8388608.0f)) {
++    return value;
++  }
++  float whole = (float)(int32_t)value;
++  return whole > value ? whole - 1.0f : whole;
++}
++
+ static float pxl__round(float value) {
+-  return floorf(value + 0.5f);
++  return pxl__floor(value + 0.5f);
+ }
+ 
+ /** Converts a whole float to an int. Clamps it to the exact float range. */
+@@ -2247,7 +2259,7 @@
+ 
+ /** Returns the pixel that holds a point. Allows a small float error. */
+ static int pxl__pixel(float value) {
+-  return pxl__to_int(floorf(value + 1e-3f));
++  return pxl__to_int(pxl__floor(value + 1e-3f));
+ }
+ 
+ static pxl_transform pxl__multiply(const pxl_transform* l,
